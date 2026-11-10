@@ -17,4 +17,3 @@ COPY --from=build /app/publish .
 
 # Configurar el puerto dinámico para Render
 ENV ASPNETCORE_URLS=http://*:$PORT
-ENTRYPOINT ["dotnet", "FerreteriaAPI.dll"]
