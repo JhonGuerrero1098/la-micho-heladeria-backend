@@ -13,7 +13,8 @@ RUN dotnet publish -c Release -o /app/publish
 # --- Etapa de Ejecución (Runtime) ---
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 WORKDIR /app
+EXPOSE 8080
 COPY --from=build /app/publish .
 
-# Configurar el puerto dinámico para Render
-ENV ASPNETCORE_URLS=http://*:$PORT
+# El puerto dinámico lo gestiona Program.cs automáticamente con la variable PORT de Render
+ENTRYPOINT ["dotnet", "FerreteriaAPI.dll"]
