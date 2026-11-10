@@ -13,7 +13,6 @@ builder.Services.AddControllers()
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-builder.Services.AddOpenApi();
 
 // Política CORS para permitir peticiones desde el frontend
 builder.Services.AddCors(options =>
@@ -36,13 +35,11 @@ builder.Services.AddScoped<IPasswordHasher<Usuarios>, PasswordHasher<Usuarios>>(
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// Habilitamos Swagger de manera global para que funcione perfecto en Render
+app.UseSwagger();
+app.UseSwaggerUI();
 
+// Redirige la raíz "/" directamente a la interfaz de Swagger
 app.MapGet("/", async context =>
 {
     context.Response.Redirect("/swagger");
@@ -50,11 +47,7 @@ app.MapGet("/", async context =>
 });
 
 app.UseCors("AngularPolicy");
-
 app.UseHttpsRedirection();
-
 app.UseAuthorization();
-
 app.MapControllers();
-
 app.Run();
