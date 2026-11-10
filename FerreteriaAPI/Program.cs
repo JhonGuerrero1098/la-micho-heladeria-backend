@@ -4,6 +4,10 @@ using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Configuración para que Render asigne el puerto dinámico correctamente
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+
 // Configuración de controladores y manejo de ciclos de referencias JSON
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
