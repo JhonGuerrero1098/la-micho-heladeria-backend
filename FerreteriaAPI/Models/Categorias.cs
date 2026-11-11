@@ -5,7 +5,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace FerreteriaAPI.Models;
 
-[Table ("Categoria", Schema = "public")]
+[Table ("categoria", Schema = "public")]
 public partial class Categorias
 {
     [Key]
