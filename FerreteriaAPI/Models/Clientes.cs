@@ -5,7 +5,7 @@ using System.ComponentModel.DataAnnotations.Schema;
 
 namespace FerreteriaAPI.Models;
 
-[Table("Clientes")]
+[Table("clientes")]
 public partial class Clientes
 {
     [Key]

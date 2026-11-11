@@ -1,13 +1,15 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
+using FerreteriaAPI.Data; // <-- Importante para usar AppDbContext
 
 [Route("api/[controller]")]
 [ApiController]
 public class CategoriasController : ControllerBase
 {
-    private readonly FerreteriaContext _context;
-    public CategoriasController(FerreteriaContext context)
+    private readonly AppDbContext _context;
+
+    public CategoriasController(AppDbContext context)
     {
         _context = context;
     }
@@ -15,13 +17,13 @@ public class CategoriasController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<Categorias>>> GetCategorias()
     {
-        return await _context.Categoria.ToListAsync();
+        return await _context.Categorias.ToListAsync();
     }
 
     [HttpGet("{id}")]
     public async Task<ActionResult<Categorias>> GetCategorias(int id)
     {
-        var categorias = await _context.Categoria.FindAsync(id);
+        var categorias = await _context.Categorias.FindAsync(id);
 
         if (categorias == null)
         {
@@ -65,35 +67,19 @@ public class CategoriasController : ControllerBase
     {
         try
         {
-            _context.Categoria.Add(categorias);
+            _context.Categorias.Add(categorias);
             await _context.SaveChangesAsync();
 
             return CreatedAtAction("GetCategorias", new { id = categorias.Id }, categorias);
         }
         catch (Exception ex)
         {
-            // Devuelve el error real de la base de datos directamente en Swagger
             return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
         }
     }
 
-    /*[HttpDelete("{id}")]
-    public async Task<IActionResult> DeleteCategorias(int id)
-    {
-        var categorias = await _context.Categoria.FindAsync(id);
-        if (categorias == null)
-        {
-            return NotFound();
-        }
-
-        _context.Categoria.Remove(categorias);
-        await _context.SaveChangesAsync();
-
-        return NoContent();
-    }*/
-
     private bool CategoriasExists(int id)
     {
-        return _context.Categoria.Any(e => e.Id == id);
+        return _context.Categorias.Any(e => e.Id == id);
     }
 }

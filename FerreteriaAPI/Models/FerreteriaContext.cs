@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using Microsoft.EntityFrameworkCore;
+using FerreteriaAPI.Models;
 
 namespace FerreteriaAPI.Models;
 
@@ -16,175 +17,136 @@ public partial class FerreteriaContext : DbContext
     }
 
     public virtual DbSet<Categorias> Categoria { get; set; }
-
     public virtual DbSet<Clientes> Clientes { get; set; }
-
     public virtual DbSet<DetalleVenta> DetalleVenta { get; set; }
-
     public virtual DbSet<Producto> Productos { get; set; }
-
     public virtual DbSet<Proveedor> Proveedores { get; set; }
-
     public virtual DbSet<Roles> Roles { get; set; }
-
     public virtual DbSet<Usuarios> Usuarios { get; set; }
-
     public virtual DbSet<Ventas> Ventas { get; set; }
-
-    // ¡ELIMINAMOS EL MÉTODO OnConfiguring QUE TENÍA LA CONEXIÓN QUEMADA DE SQL SERVER!
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        // Mapeo estricto de nombres de tablas en minúsculas para PostgreSQL (Supabase)
+
         modelBuilder.Entity<Categorias>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Categori__3214EC07EFE9BE63");
+            entity.ToTable("categoria"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.Id);
 
-            entity.Property(e => e.Descripcion)
-                .HasMaxLength(255)
-                .IsUnicode(false);
-            entity.Property(e => e.NombreCategoria)
-                .HasMaxLength(100)
-                .IsUnicode(false);
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.NombreCategoria).HasColumnName("nombrecategoria").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.Descripcion).HasColumnName("descripcion").HasMaxLength(255).IsUnicode(false);
         });
 
         modelBuilder.Entity<Clientes>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Clientes__3214EC07E841C4B7");
+            entity.ToTable("clientes"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.Id);
 
-            entity.HasIndex(e => e.Cedula, "UQ__Clientes__B4ADFE3840D1CFB6").IsUnique();
-
-            entity.Property(e => e.Cedula)
-                .HasMaxLength(20)
-                .IsUnicode(false);
-            entity.Property(e => e.Email)
-                .HasMaxLength(100)
-                .IsUnicode(false);
-            entity.Property(e => e.Nombre)
-                .HasMaxLength(100)
-                .IsUnicode(false);
-            entity.Property(e => e.Telefono)
-                .HasMaxLength(20)
-                .IsUnicode(false);
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.Cedula).HasColumnName("cedula").HasMaxLength(20).IsUnicode(false);
+            entity.Property(e => e.Email).HasColumnName("email").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.Telefono).HasColumnName("telefono").HasMaxLength(20).IsUnicode(false);
         });
 
         modelBuilder.Entity<DetalleVenta>(entity =>
         {
-            entity.HasKey(e => e.IdDetalle).HasName("PK__DetalleV__E43646A53CE1C257");
+            entity.ToTable("detalleventa"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.IdDetalle);
 
-            entity.Property(e => e.PrecioUnitario).HasColumnType("decimal(18, 2)");
+            entity.Property(e => e.IdDetalle).HasColumnName("iddetalle");
+            entity.Property(e => e.IdVenta).HasColumnName("idventa");
+            entity.Property(e => e.IdProducto).HasColumnName("idproducto");
+            entity.Property(e => e.Cantidad).HasColumnName("cantidad");
+            entity.Property(e => e.PrecioUnitario).HasColumnName("preciounitario").HasColumnType("decimal(18, 2)");
 
             entity.HasOne(d => d.IdProductoNavigation).WithMany(p => p.DetalleVenta)
                 .HasForeignKey(d => d.IdProducto)
-                .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK_DetalleVenta_Productos");
+                .OnDelete(DeleteBehavior.ClientSetNull);
 
             entity.HasOne(d => d.IdVentaNavigation).WithMany(p => p.DetalleVenta)
-                .HasForeignKey(d => d.IdVenta)
-                .HasConstraintName("FK_DetalleVenta_ventas");
+                .HasForeignKey(d => d.IdVenta);
         });
 
         modelBuilder.Entity<Producto>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Producto__3214EC07970A6472");
+            entity.ToTable("productos"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.Id);
 
-            entity.HasIndex(e => e.CodigoBarras, "IX_Productos_CodigoBarras")
-                .IsUnique()
-                .HasFilter("([CodigoBarras] IS NOT NULL)");
-
-            entity.Property(e => e.CodigoBarras)
-                .HasMaxLength(50)
-                .IsUnicode(false);
-            entity.Property(e => e.Descripcion)
-                .HasMaxLength(250)
-                .IsUnicode(false);
-            entity.Property(e => e.Nombre)
-                .HasMaxLength(100)
-                .IsUnicode(false);
-            entity.Property(e => e.Precio).HasColumnType("decimal(18, 2)");
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.Nombre).HasColumnName("nombre").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.Precio).HasColumnName("precio").HasColumnType("decimal(18, 2)");
+            entity.Property(e => e.Stock).HasColumnName("stock");
+            entity.Property(e => e.Descripcion).HasColumnName("descripcion").HasMaxLength(250).IsUnicode(false);
+            entity.Property(e => e.IdCategoria).HasColumnName("idcategoria");
+            entity.Property(e => e.IdProveedor).HasColumnName("idproveedor");
+            entity.Property(e => e.CodigoBarras).HasColumnName("codigobarras").HasMaxLength(50).IsUnicode(false);
+            entity.Property(e => e.Activo).HasColumnName("activo");
 
             entity.HasOne(d => d.IdCategoriaNavigation).WithMany(p => p.Productos)
-                .HasForeignKey(d => d.IdCategoria)
-                .HasConstraintName("FK_Productos_Categoria");
+                .HasForeignKey(d => d.IdCategoria);
 
             entity.HasOne(d => d.IdProveedorNavigation).WithMany(p => p.Productos)
-                .HasForeignKey(d => d.IdProveedor)
-                .HasConstraintName("FK_Productos_Proveedores");
+                .HasForeignKey(d => d.IdProveedor);
         });
 
         modelBuilder.Entity<Proveedor>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Proveedo__3214EC07AD074266");
+            entity.ToTable("proveedores"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.Id);
 
-            entity.Property(e => e.Direccion)
-                .HasMaxLength(150)
-                .IsUnicode(false);
-            entity.Property(e => e.Email)
-                .HasMaxLength(100)
-                .IsUnicode(false);
-            entity.Property(e => e.NombreContacto)
-                .HasMaxLength(100)
-                .IsUnicode(false);
-            entity.Property(e => e.NombreProveedor)
-                .HasMaxLength(100)
-                .IsUnicode(false);
-            entity.Property(e => e.Telefono)
-                .HasMaxLength(50)
-                .IsUnicode(false);
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.NombreProveedor).HasColumnName("nombreproveedor").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.NombreContacto).HasColumnName("nombrecontacto").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.Telefono).HasColumnName("telefono").HasMaxLength(50).IsUnicode(false);
+            entity.Property(e => e.Email).HasColumnName("email").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.Direccion).HasColumnName("direccion").HasMaxLength(150).IsUnicode(false);
         });
 
         modelBuilder.Entity<Roles>(entity =>
         {
-            entity.HasKey(e => e.IdRol).HasName("PK__Roles__2A49584C5F80084C");
+            entity.ToTable("roles"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.IdRol);
 
-            entity.HasIndex(e => e.NombreRol, "UQ__Roles__4F0B537F857D7C56").IsUnique();
-
-            entity.Property(e => e.Descripcion)
-                .HasMaxLength(150)
-                .IsUnicode(false);
-            entity.Property(e => e.NombreRol)
-                .HasMaxLength(150)
-                .IsUnicode(false);
+            entity.Property(e => e.IdRol).HasColumnName("idrol");
+            entity.Property(e => e.NombreRol).HasColumnName("nombrerol").HasMaxLength(150).IsUnicode(false);
+            entity.Property(e => e.Descripcion).HasColumnName("descripcion").HasMaxLength(150).IsUnicode(false);
         });
 
         modelBuilder.Entity<Usuarios>(entity =>
         {
-            entity.HasKey(e => e.IdUsuario).HasName("PK__Usuarios__5B65BF974BE817AE");
+            entity.ToTable("usuarios"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.IdUsuario);
 
-            entity.HasIndex(e => e.Email, "UQ__Usuarios__A9D10534640368BD").IsUnique();
-
-            entity.Property(e => e.ContrasenaHash)
-                .HasMaxLength(250)
-                .IsUnicode(false);
-            entity.Property(e => e.Email)
-                .HasMaxLength(100)
-                .IsUnicode(false);
-            entity.Property(e => e.Estado).HasDefaultValue(true);
-            entity.Property(e => e.FechaRegistro)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
-            entity.Property(e => e.NombreCompleto)
-                .HasMaxLength(100)
-                .IsUnicode(false);
+            entity.Property(e => e.IdUsuario).HasColumnName("idusuario");
+            entity.Property(e => e.NombreCompleto).HasColumnName("nombrecompleto").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.Email).HasColumnName("email").HasMaxLength(100).IsUnicode(false);
+            entity.Property(e => e.ContrasenaHash).HasColumnName("contrasenahash").HasMaxLength(250).IsUnicode(false);
+            entity.Property(e => e.IdRol).HasColumnName("idrol");
+            entity.Property(e => e.Estado).HasColumnName("estado");
+            entity.Property(e => e.FechaRegistro).HasColumnName("fecharegistro");
 
             entity.HasOne(d => d.IdRolNavigation).WithMany(p => p.Usuarios)
                 .HasForeignKey(d => d.IdRol)
-                .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK_Usuario_Rol");
+                .OnDelete(DeleteBehavior.ClientSetNull);
         });
 
         modelBuilder.Entity<Ventas>(entity =>
         {
-            entity.HasKey(e => e.Id).HasName("PK__Ventas__3214EC0715B93A83");
+            entity.ToTable("ventas"); // <-- Forzamos minúscula
+            entity.HasKey(e => e.Id);
 
-            entity.Property(e => e.Fecha)
-                .HasDefaultValueSql("(getdate())")
-                .HasColumnType("datetime");
-            entity.Property(e => e.ValorTotal).HasColumnType("decimal(18, 2)");
+            entity.Property(e => e.Id).HasColumnName("id");
+            entity.Property(e => e.Fecha).HasColumnName("fecha");
+            entity.Property(e => e.ValorTotal).HasColumnName("valortotal").HasColumnType("decimal(18, 2)");
+            entity.Property(e => e.IdCliente).HasColumnName("idcliente");
+            entity.Property(e => e.MetodoPago).HasColumnName("metodopago");
 
             entity.HasOne(d => d.IdClienteNavigation).WithMany(p => p.Venta)
                 .HasForeignKey(d => d.IdCliente)
-                .OnDelete(DeleteBehavior.ClientSetNull)
-                .HasConstraintName("FK_Ventas_Cliente");
+                .OnDelete(DeleteBehavior.ClientSetNull);
         });
 
         OnModelCreatingPartial(modelBuilder);
