@@ -1,15 +1,14 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
-using FerreteriaAPI.Data; // <-- Importante para usar AppDbContext
 
 [Route("api/[controller]")]
 [ApiController]
 public class CategoriasController : ControllerBase
 {
-    private readonly AppDbContext _context;
+    private readonly FerreteriaContext _context;
 
-    public CategoriasController(AppDbContext context)
+    public CategoriasController(FerreteriaContext context)
     {
         _context = context;
     }
@@ -17,20 +16,27 @@ public class CategoriasController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<Categorias>>> GetCategorias()
     {
-        return await _context.Categorias.ToListAsync();
+        return await _context.Categoria.ToListAsync();
     }
 
     [HttpGet("{id}")]
     public async Task<ActionResult<Categorias>> GetCategorias(int id)
     {
-        var categorias = await _context.Categorias.FindAsync(id);
-
-        if (categorias == null)
+        try
         {
-            return NotFound();
-        }
+            var categoria = await _context.Categoria.FindAsync(id);
 
-        return categorias;
+            if (categoria == null)
+            {
+                return NotFound();
+            }
+
+            return categoria;
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
+        }
     }
 
     [HttpPut("{id}")]
@@ -67,7 +73,7 @@ public class CategoriasController : ControllerBase
     {
         try
         {
-            _context.Categorias.Add(categorias);
+            _context.Categoria.Add(categorias);
             await _context.SaveChangesAsync();
 
             return CreatedAtAction("GetCategorias", new { id = categorias.Id }, categorias);
@@ -80,6 +86,6 @@ public class CategoriasController : ControllerBase
 
     private bool CategoriasExists(int id)
     {
-        return _context.Categorias.Any(e => e.Id == id);
+        return _context.Categoria.Any(e => e.Id == id);
     }
 }
