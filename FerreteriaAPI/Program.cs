@@ -30,15 +30,19 @@ builder.Services.AddCors(options =>
 });
 
 // ==========================================
-// REGISTRO DEL CONTEXTO CON RESILIENCIA DE RED
+// REGISTRO DEL CONTEXTO CON RESILIENCIA Y TIMEOUT
 // ==========================================
 builder.Services.AddDbContext<FerreteriaContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection"),
-        npgsqlOptions => npgsqlOptions.EnableRetryOnFailure(
-            maxRetryCount: 5,
-            maxRetryDelay: TimeSpan.FromSeconds(10),
-            errorCodesToAdd: null)
+        npgsqlOptions =>
+        {
+            npgsqlOptions.EnableRetryOnFailure(
+                maxRetryCount: 5,
+                maxRetryDelay: TimeSpan.FromSeconds(10),
+                errorCodesToAdd: null);
+            npgsqlOptions.CommandTimeout(30); // Margen extendido para evitar timeouts de red en la nube
+        }
     ));
 
 // Hash de contraseñas (PBKDF2 con HMAC-SHA512, sal aleatoria por usuario)
@@ -63,3 +67,4 @@ app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
 
+app.Run();
