@@ -73,6 +73,15 @@ public class CategoriasController : ControllerBase
     {
         try
         {
+            // Validación para evitar duplicados por doble clic o reintentos automáticos de red
+            bool existe = await _context.Categoria
+                .AnyAsync(c => c.NombreCategoria.ToLower() == categorias.NombreCategoria.ToLower());
+
+            if (existe)
+            {
+                return BadRequest("Ya existe una categoría registrada con ese nombre.");
+            }
+
             _context.Categoria.Add(categorias);
             await _context.SaveChangesAsync();
 
