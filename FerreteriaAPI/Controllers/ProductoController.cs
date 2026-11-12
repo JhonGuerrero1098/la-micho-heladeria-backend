@@ -67,14 +67,40 @@ public class ProductosController : ControllerBase
         return NoContent();
     }
 
+    // POST: api/Productos
     [HttpPost]
     public async Task<ActionResult<Producto>> PostProducto(Producto producto)
     {
-        producto.Activo = true; // Asegurar que nazca activo por defecto
-        _context.Productos.Add(producto);
-        await _context.SaveChangesAsync();
+        try
+        {
+            producto.Activo = true; // Asegurar que nazca activo por defecto
 
-        return CreatedAtAction(nameof(GetProducto), new { id = producto.Id }, producto);
+            // Validación preventiva: Verificar si ya existe un producto con el mismo código de barras
+            if (!string.IsNullOrEmpty(producto.CodigoBarras))
+            {
+                bool existe = await _context.Productos
+                    .AnyAsync(p => p.CodigoBarras == producto.CodigoBarras);
+
+                if (existe)
+                {
+                    return BadRequest("Ya existe un producto registrado con ese código de barras.");
+                }
+            }
+
+            _context.Productos.Add(producto);
+            await _context.SaveChangesAsync();
+
+            return CreatedAtAction("GetProducto", new { id = producto.Id }, producto);
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+        {
+            // Captura por si la base de datos frena un duplicado por concurrencia o reintento de red
+            return BadRequest(new { mensaje = "No se pudo registrar el producto. Es posible que el código de barras ya se encuentre registrado.", detalle = dbEx.InnerException?.Message });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
+        }
     }
 
     // SOFT DELETE: En lugar de borrar de la BD, marcamos Activo = false
