@@ -35,29 +35,44 @@ namespace FerreteriaAPI.Controllers
                 return BadRequest("Por seguridad, las cuentas con rol de Superusuario solo pueden ser creadas directamente desde la base de datos.");
             }
 
-            // Validar si el correo ya está registrado
-            var existeCorreo = await _context.Usuarios.AnyAsync(u => u.Email == dto.Email);
-            if (existeCorreo)
+            try
             {
-                return BadRequest("Ya existe un usuario registrado con este correo electrónico.");
+                // Normalizar el correo para evitar duplicados por mayúsculas, minúsculas o espacios accidentales
+                var emailLimpio = dto.Email.Trim().ToLower();
+
+                // Validar si el correo ya está registrado en la base de datos
+                var existeCorreo = await _context.Usuarios.AnyAsync(u => u.Email.ToLower() == emailLimpio);
+                if (existeCorreo)
+                {
+                    return BadRequest("Ya existe un usuario registrado con este correo electrónico.");
+                }
+
+                var nuevoUsuario = new Usuarios
+                {
+                    NombreCompleto = dto.NombreCompleto,
+                    Email = emailLimpio, // Guardar normalizado
+                    IdRol = dto.IdRol,
+                    Estado = true,
+                    FechaRegistro = DateTime.Now
+                };
+
+                // Hashear la contraseña de forma segura
+                nuevoUsuario.ContrasenaHash = _passwordHasher.HashPassword(nuevoUsuario, dto.Contrasena);
+
+                _context.Usuarios.Add(nuevoUsuario);
+                await _context.SaveChangesAsync();
+
+                return Ok(new { mensaje = "Usuario registrado exitosamente", usuario = nuevoUsuario });
             }
-
-            var nuevoUsuario = new Usuarios
+            catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
             {
-                NombreCompleto = dto.NombreCompleto,
-                Email = dto.Email,
-                IdRol = dto.IdRol,
-                Estado = true,
-                FechaRegistro = DateTime.Now
-            };
-
-            // Hashear la contraseña de forma segura
-            nuevoUsuario.ContrasenaHash = _passwordHasher.HashPassword(nuevoUsuario, dto.Contrasena);
-
-            _context.Usuarios.Add(nuevoUsuario);
-            await _context.SaveChangesAsync();
-
-            return Ok(new { mensaje = "Usuario registrado exitosamente", usuario = nuevoUsuario });
+                // Captura definitiva por si un reintento de red o concurrencia intenta duplicar el correo en Supabase
+                return BadRequest(new { mensaje = "No se pudo registrar el usuario. El correo electrónico ya se encuentra registrado.", detalle = dbEx.InnerException?.Message });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { mensaje = "Ocurrió un error al registrar el usuario.", detalle = ex.InnerException?.Message ?? ex.Message });
+            }
         }
 
         // POST: api/Usuarios/Login
