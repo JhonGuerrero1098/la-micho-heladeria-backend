@@ -71,24 +71,31 @@ public class ClientesController : ControllerBase
     }
 
     // POST: api/Clientes
+    // POST: api/Clientes
     [HttpPost]
     public async Task<ActionResult<Clientes>> PostCliente(Clientes cliente)
     {
-        // Validación al crear: Verificar si ya existe un cliente con la misma cédula
-        var clienteExistente = await _context.Clientes
-            .FirstOrDefaultAsync(c => c.Cedula == cliente.Cedula);
-
-        if (clienteExistente != null)
+        try
         {
-            return BadRequest("Ya existe un cliente registrado con el número de cédula ingresado.");
+            // Validación al crear: Verificar si ya existe un cliente con la misma cédula
+            var clienteExistente = await _context.Clientes
+                .FirstOrDefaultAsync(c => c.Cedula == cliente.Cedula);
+
+            if (clienteExistente != null)
+            {
+                return BadRequest("Ya existe un cliente registrado con el número de cédula ingresado.");
+            }
+
+            _context.Clientes.Add(cliente);
+            await _context.SaveChangesAsync();
+
+            return CreatedAtAction(nameof(GetCliente), new { id = cliente.Id }, cliente);
         }
-
-        _context.Clientes.Add(cliente);
-        await _context.SaveChangesAsync();
-
-        return CreatedAtAction(nameof(GetCliente), new { id = cliente.Id }, cliente);
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
+        }
     }
-
     // DELETE: api/Clientes/5
     [HttpDelete("{id}")]
     public async Task<IActionResult> DeleteCliente(int id)
