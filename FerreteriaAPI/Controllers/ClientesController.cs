@@ -71,14 +71,12 @@ public class ClientesController : ControllerBase
     }
 
     // POST: api/Clientes
-    // POST: api/Clientes
     [HttpPost]
     public async Task<ActionResult<Clientes>> PostCliente(Clientes cliente)
     {
         try
         {
-            // Validación para evitar duplicados por doble clic o reintentos automáticos de red
-            // (Verificando por el número de cédula único)
+            // 1. Validación preventiva en memoria
             bool existe = await _context.Clientes
                 .AnyAsync(c => c.Cedula == cliente.Cedula);
 
@@ -91,6 +89,11 @@ public class ClientesController : ControllerBase
             await _context.SaveChangesAsync();
 
             return CreatedAtAction("GetCliente", new { id = cliente.Id }, cliente);
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+        {
+            // 2. Captura por si la base de datos frena un duplicado por concurrencia o reintento de red
+            return BadRequest(new { mensaje = "No se pudo registrar el cliente. Es posible que la cédula ya se encuentre registrada.", detalle = dbEx.InnerException?.Message });
         }
         catch (Exception ex)
         {
