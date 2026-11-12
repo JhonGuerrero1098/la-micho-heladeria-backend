@@ -72,17 +72,10 @@ public class VentasController : ControllerBase
 
             decimal valorTotalCalculado = 0;
 
-            // Extraer todos los IDs de productos solicitados
-            var idsProductos = dto.DetalleVenta.Select(d => d.IdProducto).ToList();
-
-            // Consultar todos los productos de un solo viaje para evitar timeouts
-            var productosDb = await _context.Productos
-                .Where(p => idsProductos.Contains(p.Id))
-                .ToListAsync();
-
             foreach (var itemDto in dto.DetalleVenta)
             {
-                var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
+                // Consultar producto individualmente de forma segura y directa
+                var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
 
                 if (producto == null)
                 {
