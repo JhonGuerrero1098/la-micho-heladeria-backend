@@ -50,6 +50,16 @@ public class VentasController : ControllerBase
 
         try
         {
+            // 1. Validar si el cliente existe (si se envió un IdCliente)
+            if (dto.IdCliente.HasValue)
+            {
+                var clienteExiste = await _context.Clientes.AnyAsync(c => c.Id == dto.IdCliente.Value);
+                if (!clienteExiste)
+                {
+                    return NotFound($"El cliente con ID {dto.IdCliente.Value} no existe en la base de datos.");
+                }
+            }
+
             // Validación preventiva de duplicados (últimos 5 segundos)
             var hacePoco = DateTime.UtcNow.AddSeconds(-5);
             bool ventaDuplicada = await _context.Ventas
@@ -74,7 +84,6 @@ public class VentasController : ControllerBase
 
             foreach (var itemDto in dto.DetalleVenta)
             {
-                // Consultar producto individualmente de forma segura y directa
                 var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
 
                 if (producto == null)
