@@ -48,13 +48,11 @@ public class VentasController : ControllerBase
             return BadRequest("La venta debe incluir al menos un producto.");
         }
 
-        // Obtener la estrategia de ejecución para Npgsql con reintentos habilitados
         var strategy = _context.Database.CreateExecutionStrategy();
 
-        // Envolver TODO (validación de duplicados, transacción y operaciones) dentro de la estrategia
         return await strategy.ExecuteAsync(async () =>
         {
-            // Validación preventiva de duplicados dentro de la estrategia
+            // Validación preventiva de duplicados
             var hacePoco = DateTime.UtcNow.AddSeconds(-5);
             bool ventaDuplicada = await _context.Ventas
                 .AnyAsync(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco);
@@ -72,15 +70,23 @@ public class VentasController : ControllerBase
                 {
                     IdCliente = dto.IdCliente,
                     MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
-                    Fecha = DateTime.UtcNow, // Usando UTC para PostgreSQL / Supabase
+                    Fecha = DateTime.UtcNow,
                     DetalleVenta = new List<DetalleVenta>()
                 };
 
                 decimal valorTotalCalculado = 0;
 
+                // Extraer todos los IDs de productos solicitados en la venta
+                var idsProductos = dto.DetalleVenta.Select(d => d.IdProducto).ToList();
+
+                // Consultar TODOS los productos de un solo viaje a la base de datos (evita timeouts y múltiples peticiones)
+                var productosDb = await _context.Productos
+                    .Where(p => idsProductos.Contains(p.Id))
+                    .ToListAsync();
+
                 foreach (var itemDto in dto.DetalleVenta)
                 {
-                    var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
+                    var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
 
                     if (producto == null)
                     {
