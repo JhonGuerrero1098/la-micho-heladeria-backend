@@ -59,72 +59,79 @@ public class VentasController : ControllerBase
             return BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
         }
 
-        using var transaction = await _context.Database.BeginTransactionAsync();
+        // Obtener la estrategia de ejecución para Npgsql con reintentos habilitados
+        var strategy = _context.Database.CreateExecutionStrategy();
 
-        try
+        // Ejecutar toda la lógica transaccional dentro de la estrategia permitida por EF Core
+        return await strategy.ExecuteAsync(async () =>
         {
-            var nuevaVenta = new Ventas
+            using var transaction = await _context.Database.BeginTransactionAsync();
+
+            try
             {
-                IdCliente = dto.IdCliente, // Corregido con C mayúscula
-                MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
-                Fecha = DateTime.UtcNow, // Usando UTC para PostgreSQL / Supabase
-                DetalleVenta = new List<DetalleVenta>()
-            };
-
-            decimal valorTotalCalculado = 0;
-
-            foreach (var itemDto in dto.DetalleVenta)
-            {
-                var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
-
-                if (producto == null)
+                var nuevaVenta = new Ventas
                 {
-                    await transaction.RollbackAsync();
-                    return NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
+                    IdCliente = dto.IdCliente,
+                    MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
+                    Fecha = DateTime.UtcNow, // Usando UTC para PostgreSQL / Supabase
+                    DetalleVenta = new List<DetalleVenta>()
+                };
+
+                decimal valorTotalCalculado = 0;
+
+                foreach (var itemDto in dto.DetalleVenta)
+                {
+                    var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
+
+                    if (producto == null)
+                    {
+                        await transaction.RollbackAsync();
+                        return NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
+                    }
+
+                    if (producto.Stock < itemDto.Cantidad)
+                    {
+                        await transaction.RollbackAsync();
+                        return BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
+                    }
+
+                    valorTotalCalculado += producto.Precio * itemDto.Cantidad;
+
+                    producto.Stock -= itemDto.Cantidad;
+                    _context.Productos.Update(producto);
+
+                    if (producto.Stock <= 10)
+                    {
+                        EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
+                    }
+
+                    nuevaVenta.DetalleVenta.Add(new DetalleVenta
+                    {
+                        IdProducto = itemDto.IdProducto,
+                        Cantidad = itemDto.Cantidad,
+                        PrecioUnitario = producto.Precio
+                    });
                 }
 
-                if (producto.Stock < itemDto.Cantidad)
-                {
-                    await transaction.RollbackAsync();
-                    return BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
-                }
+                nuevaVenta.ValorTotal = valorTotalCalculado;
 
-                valorTotalCalculado += producto.Precio * itemDto.Cantidad;
+                _context.Ventas.Add(nuevaVenta);
+                await _context.SaveChangesAsync();
+                await transaction.CommitAsync();
 
-                producto.Stock -= itemDto.Cantidad;
-                _context.Productos.Update(producto);
-
-                if (producto.Stock <= 10)
-                {
-                    EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
-                }
-
-                nuevaVenta.DetalleVenta.Add(new DetalleVenta
-                {
-                    IdProducto = itemDto.IdProducto,
-                    Cantidad = itemDto.Cantidad,
-                    PrecioUnitario = producto.Precio
-                });
+                return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
             }
-
-            nuevaVenta.ValorTotal = valorTotalCalculado; // Corregido con T mayúscula
-
-            _context.Ventas.Add(nuevaVenta);
-            await _context.SaveChangesAsync();
-            await transaction.CommitAsync();
-
-            return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
-        }
-        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
-        {
-            await transaction.RollbackAsync();
-            return BadRequest(new { mensaje = "No se pudo procesar la venta debido a un conflicto de concurrencia o duplicidad.", detalle = dbEx.InnerException?.Message });
-        }
-        catch (Exception ex)
-        {
-            await transaction.RollbackAsync();
-            return StatusCode(500, $"Ocurrió un error al procesar la venta: {ex.Message}");
-        }
+            catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+            {
+                await transaction.RollbackAsync();
+                return BadRequest(new { mensaje = "No se pudo procesar la venta debido a un conflicto de concurrencia o duplicidad.", detalle = dbEx.InnerException?.Message });
+            }
+            catch (Exception ex)
+            {
+                await transaction.RollbackAsync();
+                return StatusCode(500, $"Ocurrió un error al procesar la venta: {ex.Message}");
+            }
+        });
     }
 
     private void EnviarSmsAlAdmin(string nombreProducto, int stockActual)
