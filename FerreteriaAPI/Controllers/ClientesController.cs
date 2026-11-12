@@ -77,24 +77,30 @@ public class ClientesController : ControllerBase
     {
         try
         {
-            // Validación al crear: Verificar si ya existe un cliente con la misma cédula
-            var clienteExistente = await _context.Clientes
-                .FirstOrDefaultAsync(c => c.Cedula == cliente.Cedula);
+            // Validación para evitar duplicados por doble clic o reintentos automáticos de red
+            // (Verificando por el número de cédula único)
+            bool existe = await _context.Clientes
+                .AnyAsync(c => c.Cedula == cliente.Cedula);
 
-            if (clienteExistente != null)
+            if (existe)
             {
-                return BadRequest("Ya existe un cliente registrado con el número de cédula ingresado.");
+                return BadRequest("Ya existe un cliente registrado con esa cédula.");
             }
 
             _context.Clientes.Add(cliente);
             await _context.SaveChangesAsync();
 
-            return CreatedAtAction(nameof(GetCliente), new { id = cliente.Id }, cliente);
+            return CreatedAtAction("GetCliente", new { id = cliente.Id }, cliente);
         }
         catch (Exception ex)
         {
             return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
         }
+    }
+
+    private bool ClientesExists(int id)
+    {
+        return _context.Clientes.Any(e => e.Id == id);
     }
     // DELETE: api/Clientes/5
     [HttpDelete("{id}")]
