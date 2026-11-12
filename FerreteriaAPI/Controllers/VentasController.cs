@@ -59,93 +59,81 @@ public class VentasController : ControllerBase
             return BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
         }
 
-        // Obtener la estrategia de ejecución para Npgsql con reintentos habilitados
-        var strategy = _context.Database.CreateExecutionStrategy();
+        using var transaction = await _context.Database.BeginTransactionAsync();
 
-        // Ejecutar toda la lógica transaccional dentro de la estrategia permitida por EF Core
-        return await strategy.ExecuteAsync(async () =>
+        try
         {
-            using var transaction = await _context.Database.BeginTransactionAsync();
-
-            try
+            var nuevaVenta = new Ventas
             {
-                var nuevaVenta = new Ventas
+                IdCliente = dto.IdCliente,
+                MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
+                Fecha = DateTime.UtcNow, // Usando UTC para PostgreSQL / Supabase
+                DetalleVenta = new List<DetalleVenta>()
+            };
+
+            decimal valorTotalCalculado = 0;
+
+            foreach (var itemDto in dto.DetalleVenta)
+            {
+                var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
+
+                if (producto == null)
                 {
-                    IdCliente = dto.IdCliente,
-                    MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
-                    Fecha = DateTime.UtcNow, // Usando UTC para PostgreSQL / Supabase
-                    DetalleVenta = new List<DetalleVenta>()
-                };
-
-                decimal valorTotalCalculado = 0;
-
-                foreach (var itemDto in dto.DetalleVenta)
-                {
-                    var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
-
-                    if (producto == null)
-                    {
-                        await transaction.RollbackAsync();
-                        return NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
-                    }
-
-                    if (producto.Stock < itemDto.Cantidad)
-                    {
-                        await transaction.RollbackAsync();
-                        return BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
-                    }
-
-                    valorTotalCalculado += producto.Precio * itemDto.Cantidad;
-
-                    producto.Stock -= itemDto.Cantidad;
-                    _context.Productos.Update(producto);
-
-                    if (producto.Stock <= 10)
-                    {
-                        EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
-                    }
-
-                    nuevaVenta.DetalleVenta.Add(new DetalleVenta
-                    {
-                        IdProducto = itemDto.IdProducto,
-                        Cantidad = itemDto.Cantidad,
-                        PrecioUnitario = producto.Precio
-                    });
+                    await transaction.RollbackAsync();
+                    return NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
                 }
 
-                nuevaVenta.ValorTotal = valorTotalCalculado;
-
-                _context.Ventas.Add(nuevaVenta);
-                await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
-
-                return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
-            }
-            catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
-            {
-                await transaction.RollbackAsync();
-                return BadRequest(new
+                if (producto.Stock < itemDto.Cantidad)
                 {
-                    mensaje = "Error de base de datos al procesar la venta.",
-                    errorInterno = dbEx.InnerException?.Message ?? dbEx.Message
+                    await transaction.RollbackAsync();
+                    return BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
+                }
+
+                valorTotalCalculado += producto.Precio * itemDto.Cantidad;
+
+                producto.Stock -= itemDto.Cantidad;
+                _context.Productos.Update(producto);
+
+                if (producto.Stock <= 10)
+                {
+                    EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
+                }
+
+                nuevaVenta.DetalleVenta.Add(new DetalleVenta
+                {
+                    IdProducto = itemDto.IdProducto,
+                    Cantidad = itemDto.Cantidad,
+                    PrecioUnitario = producto.Precio
                 });
             }
-            catch (Exception ex)
-            {
-                await transaction.RollbackAsync();
-                return StatusCode(500, new
-                {
-                    mensaje = "Ocurrió un error inesperado al procesar la venta.",
-                    errorInterno = ex.InnerException?.Message ?? ex.Message,
-                    stackTrace = ex.StackTrace
-                });
-            }
-        });
-    }
 
-    private void EnviarSmsAlAdmin(string nombreProducto, int stockActual)
-    {
-        string mensaje = $"Stock insuficiente para el producto {nombreProducto}. Stock actual: {stockActual}";
+            nuevaVenta.ValorTotal = valorTotalCalculado;
+
+            _context.Ventas.Add(nuevaVenta);
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+        {
+            await transaction.RollbackAsync();
+            return BadRequest(new
+            {
+                mensaje = "Error de base de datos al procesar la venta.",
+                errorInterno = dbEx.InnerException?.Message ?? dbEx.Message
+            });
+        }
+        catch (Exception ex)
+        {
+            await transaction.RollbackAsync();
+            return StatusCode(500, new
+            {
+                mensaje = "Ocurrió un error inesperado al procesar la venta.",
+                errorInterno = ex.InnerException?.Message ?? ex.Message,
+                stackTrace = ex.StackTrace
+            });
+        }
     }
 
     // GET: api/Ventas/PorFecha?fecha=2026-09-30
@@ -231,6 +219,10 @@ public class VentasController : ControllerBase
             producto = productoInfo,
             totalUnidadesVendidas = productoMasVendido.TotalCantidadVendida
         });
+    }
+    private void EnviarSmsAlAdmin (string nombreProducto, int stockActual)
+    {
+        string mensaje = $"Stock insuficiente para el producto {nombreProducto}";
     }
 }
 
