@@ -53,7 +53,7 @@ namespace FerreteriaAPI.Controllers
                     Email = emailLimpio, // Guardar normalizado
                     IdRol = dto.IdRol,
                     Estado = true,
-                    FechaRegistro = DateTime.Now
+                    FechaRegistro = DateTime.UtcNow
                 };
 
                 // Hashear la contraseña de forma segura
