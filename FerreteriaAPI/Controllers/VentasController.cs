@@ -124,12 +124,21 @@ public class VentasController : ControllerBase
             catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
             {
                 await transaction.RollbackAsync();
-                return BadRequest(new { mensaje = "No se pudo procesar la venta debido a un conflicto de concurrencia o duplicidad.", detalle = dbEx.InnerException?.Message });
+                return BadRequest(new
+                {
+                    mensaje = "Error de base de datos al procesar la venta.",
+                    errorInterno = dbEx.InnerException?.Message ?? dbEx.Message
+                });
             }
             catch (Exception ex)
             {
                 await transaction.RollbackAsync();
-                return StatusCode(500, $"Ocurrió un error al procesar la venta: {ex.Message}");
+                return StatusCode(500, new
+                {
+                    mensaje = "Ocurrió un error inesperado al procesar la venta.",
+                    errorInterno = ex.InnerException?.Message ?? ex.Message,
+                    stackTrace = ex.StackTrace
+                });
             }
         });
     }
