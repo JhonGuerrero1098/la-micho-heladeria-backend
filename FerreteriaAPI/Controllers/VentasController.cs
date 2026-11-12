@@ -43,20 +43,31 @@ public class VentasController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<Ventas>> PostVenta([FromBody] VentaCreateDto dto)
     {
+        // Validación inicial de los detalles
+        if (dto.DetalleVenta == null || !dto.DetalleVenta.Any())
+        {
+            return BadRequest("La venta debe incluir al menos un producto.");
+        }
+
+        // Validación preventiva de duplicados por reintentos de red / doble clic (últimos 5 segundos)
+        var hacePoco = DateTime.UtcNow.AddSeconds(-5);
+        bool ventaDuplicada = await _context.Ventas
+            .AnyAsync(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco);
+
+        if (ventaDuplicada)
+        {
+            return BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
+        }
+
         using var transaction = await _context.Database.BeginTransactionAsync();
 
         try
         {
-            if (dto.DetalleVenta == null || !dto.DetalleVenta.Any())
-            {
-                return BadRequest("La venta debe incluir al menos un producto.");
-            }
-
             var nuevaVenta = new Ventas
             {
-                IdCliente = dto.IdCliente,
+                IdCliente = dto.IdCliente, // Corregido con C mayúscula
                 MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
-                Fecha = DateTime.Now,
+                Fecha = DateTime.UtcNow, // Usando UTC para PostgreSQL / Supabase
                 DetalleVenta = new List<DetalleVenta>()
             };
 
@@ -68,11 +79,13 @@ public class VentasController : ControllerBase
 
                 if (producto == null)
                 {
+                    await transaction.RollbackAsync();
                     return NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
                 }
 
                 if (producto.Stock < itemDto.Cantidad)
                 {
+                    await transaction.RollbackAsync();
                     return BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
                 }
 
@@ -94,13 +107,18 @@ public class VentasController : ControllerBase
                 });
             }
 
-            nuevaVenta.ValorTotal = valorTotalCalculado;
+            nuevaVenta.ValorTotal = valorTotalCalculado; // Corregido con T mayúscula
 
             _context.Ventas.Add(nuevaVenta);
             await _context.SaveChangesAsync();
             await transaction.CommitAsync();
 
             return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+        {
+            await transaction.RollbackAsync();
+            return BadRequest(new { mensaje = "No se pudo procesar la venta debido a un conflicto de concurrencia o duplicidad.", detalle = dbEx.InnerException?.Message });
         }
         catch (Exception ex)
         {
