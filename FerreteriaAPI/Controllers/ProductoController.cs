@@ -75,16 +75,10 @@ public class ProductosController : ControllerBase
         {
             producto.Activo = true; // Asegurar que nazca activo por defecto
 
-            // Validación preventiva: Verificar si ya existe un producto con el mismo código de barras
-            if (!string.IsNullOrEmpty(producto.CodigoBarras))
+            // Si viene un código de barras vacío, lo guardamos como NULL para que no cause conflictos
+            if (string.IsNullOrWhiteSpace(producto.CodigoBarras))
             {
-                bool existe = await _context.Productos
-                    .AnyAsync(p => p.CodigoBarras == producto.CodigoBarras);
-
-                if (existe)
-                {
-                    return BadRequest("Ya existe un producto registrado con ese código de barras.");
-                }
+                producto.CodigoBarras = null;
             }
 
             _context.Productos.Add(producto);
@@ -94,8 +88,8 @@ public class ProductosController : ControllerBase
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
         {
-            // Captura por si la base de datos frena un duplicado por concurrencia o reintento de red
-            return BadRequest(new { mensaje = "No se pudo registrar el producto. Es posible que el código de barras ya se encuentre registrado.", detalle = dbEx.InnerException?.Message });
+            // Si Supabase frena un código de barras repetido por el índice único
+            return BadRequest(new { mensaje = "No se pudo registrar el producto. El código de barras ya se encuentra registrado.", detalle = dbEx.InnerException?.Message });
         }
         catch (Exception ex)
         {
