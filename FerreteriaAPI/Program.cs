@@ -30,18 +30,14 @@ builder.Services.AddCors(options =>
 });
 
 // ==========================================
-// REGISTRO DEL CONTEXTO CON RESILIENCIA Y TIMEOUT
+// REGISTRO DEL CONTEXTO (Sin EnableRetryOnFailure para permitir transacciones manuales limpias)
 // ==========================================
 builder.Services.AddDbContext<FerreteriaContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection"),
         npgsqlOptions =>
         {
-            npgsqlOptions.EnableRetryOnFailure(
-                maxRetryCount: 5,
-                maxRetryDelay: TimeSpan.FromSeconds(10),
-                errorCodesToAdd: null);
-            npgsqlOptions.CommandTimeout(30); // Margen extendido para evitar timeouts de red en la nube
+            npgsqlOptions.CommandTimeout(40); // Margen extendido de 60 segundos para evitar timeouts con Supabase
         }
     ));
 
