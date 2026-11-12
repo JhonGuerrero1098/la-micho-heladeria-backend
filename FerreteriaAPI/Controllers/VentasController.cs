@@ -48,104 +48,97 @@ public class VentasController : ControllerBase
             return BadRequest("La venta debe incluir al menos un producto.");
         }
 
-        var strategy = _context.Database.CreateExecutionStrategy();
-
-        return await strategy.ExecuteAsync(async () =>
+        try
         {
-            // Validación preventiva de duplicados
+            // Validación preventiva de duplicados (últimos 5 segundos)
             var hacePoco = DateTime.UtcNow.AddSeconds(-5);
             bool ventaDuplicada = await _context.Ventas
                 .AnyAsync(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco);
 
             if (ventaDuplicada)
             {
-                return (ActionResult<Ventas>)BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
+                return BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
             }
 
             using var transaction = await _context.Database.BeginTransactionAsync();
 
-            try
+            var nuevaVenta = new Ventas
             {
-                var nuevaVenta = new Ventas
+                IdCliente = dto.IdCliente,
+                MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
+                Fecha = DateTime.UtcNow,
+                DetalleVenta = new List<DetalleVenta>()
+            };
+
+            decimal valorTotalCalculado = 0;
+
+            // Extraer todos los IDs de productos solicitados
+            var idsProductos = dto.DetalleVenta.Select(d => d.IdProducto).ToList();
+
+            // Consultar todos los productos de un solo viaje para evitar timeouts
+            var productosDb = await _context.Productos
+                .Where(p => idsProductos.Contains(p.Id))
+                .ToListAsync();
+
+            foreach (var itemDto in dto.DetalleVenta)
+            {
+                var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
+
+                if (producto == null)
                 {
-                    IdCliente = dto.IdCliente,
-                    MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
-                    Fecha = DateTime.UtcNow,
-                    DetalleVenta = new List<DetalleVenta>()
-                };
-
-                decimal valorTotalCalculado = 0;
-
-                // Extraer todos los IDs de productos solicitados en la venta
-                var idsProductos = dto.DetalleVenta.Select(d => d.IdProducto).ToList();
-
-                // Consultar TODOS los productos de un solo viaje a la base de datos (evita timeouts y múltiples peticiones)
-                var productosDb = await _context.Productos
-                    .Where(p => idsProductos.Contains(p.Id))
-                    .ToListAsync();
-
-                foreach (var itemDto in dto.DetalleVenta)
-                {
-                    var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
-
-                    if (producto == null)
-                    {
-                        await transaction.RollbackAsync();
-                        return (ActionResult<Ventas>)NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
-                    }
-
-                    if (producto.Stock < itemDto.Cantidad)
-                    {
-                        await transaction.RollbackAsync();
-                        return (ActionResult<Ventas>)BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
-                    }
-
-                    valorTotalCalculado += producto.Precio * itemDto.Cantidad;
-
-                    producto.Stock -= itemDto.Cantidad;
-                    _context.Productos.Update(producto);
-
-                    if (producto.Stock <= 10)
-                    {
-                        EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
-                    }
-
-                    nuevaVenta.DetalleVenta.Add(new DetalleVenta
-                    {
-                        IdProducto = itemDto.IdProducto,
-                        Cantidad = itemDto.Cantidad,
-                        PrecioUnitario = producto.Precio
-                    });
+                    await transaction.RollbackAsync();
+                    return NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
                 }
 
-                nuevaVenta.ValorTotal = valorTotalCalculado;
-
-                _context.Ventas.Add(nuevaVenta);
-                await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
-
-                return (ActionResult<Ventas>)CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
-            }
-            catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
-            {
-                await transaction.RollbackAsync();
-                return (ActionResult<Ventas>)BadRequest(new
+                if (producto.Stock < itemDto.Cantidad)
                 {
-                    mensaje = "Error de base de datos al procesar la venta.",
-                    errorInterno = dbEx.InnerException?.Message ?? dbEx.Message
+                    await transaction.RollbackAsync();
+                    return BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
+                }
+
+                valorTotalCalculado += producto.Precio * itemDto.Cantidad;
+
+                producto.Stock -= itemDto.Cantidad;
+                _context.Productos.Update(producto);
+
+                if (producto.Stock <= 10)
+                {
+                    EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
+                }
+
+                nuevaVenta.DetalleVenta.Add(new DetalleVenta
+                {
+                    IdProducto = itemDto.IdProducto,
+                    Cantidad = itemDto.Cantidad,
+                    PrecioUnitario = producto.Precio
                 });
             }
-            catch (Exception ex)
+
+            nuevaVenta.ValorTotal = valorTotalCalculado;
+
+            _context.Ventas.Add(nuevaVenta);
+            await _context.SaveChangesAsync();
+            await transaction.CommitAsync();
+
+            return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+        {
+            return BadRequest(new
             {
-                await transaction.RollbackAsync();
-                return (ActionResult<Ventas>)StatusCode(500, new
-                {
-                    mensaje = "Ocurrió un error inesperado al procesar la venta.",
-                    errorInterno = ex.InnerException?.Message ?? ex.Message,
-                    stackTrace = ex.StackTrace
-                });
-            }
-        });
+                mensaje = "Error de base de datos al procesar la venta.",
+                errorInterno = dbEx.InnerException?.Message ?? dbEx.Message
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new
+            {
+                mensaje = "Ocurrió un error inesperado al procesar la venta.",
+                errorInterno = ex.InnerException?.Message ?? ex.Message,
+                stackTrace = ex.StackTrace
+            });
+        }
     }
 
     // GET: api/Ventas/PorFecha?fecha=2026-09-30

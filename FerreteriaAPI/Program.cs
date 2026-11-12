@@ -41,7 +41,7 @@ builder.Services.AddDbContext<FerreteriaContext>(options =>
                 maxRetryCount: 5,
                 maxRetryDelay: TimeSpan.FromSeconds(10),
                 errorCodesToAdd: null);
-            npgsqlOptions.CommandTimeout(60); // Margen extendido para evitar timeouts de red en la nube
+            npgsqlOptions.CommandTimeout(30); // Margen extendido para evitar timeouts de red en la nube
         }
     ));
 
