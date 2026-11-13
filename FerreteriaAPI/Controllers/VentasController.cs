@@ -141,7 +141,7 @@ public class VentasController : ControllerBase
                 stackTrace = ex.StackTrace
             });
         }
-    }
+    } 
 
     // GET: api/Ventas/PorFecha?fecha=2026-09-30
     [HttpGet("PorFecha")]
