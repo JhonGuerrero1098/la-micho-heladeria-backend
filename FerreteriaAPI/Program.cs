@@ -8,7 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-// Configuración de controladores y manejo de ciclos de referencias JSON
+// Configuración de controladores y manejo de ciclos de referencias JSON (Evita bucles infinitos en .Include)
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
@@ -30,14 +30,15 @@ builder.Services.AddCors(options =>
 });
 
 // ==========================================
-// REGISTRO DEL CONTEXTO (Sin EnableRetryOnFailure para permitir transacciones manuales limpias)
+// REGISTRO DEL CONTEXTO
+// (Sin EnableRetryOnFailure para permitir transacciones manuales limpias con Npgsql)
 // ==========================================
 builder.Services.AddDbContext<FerreteriaContext>(options =>
     options.UseNpgsql(
         builder.Configuration.GetConnectionString("DefaultConnection"),
         npgsqlOptions =>
         {
-            npgsqlOptions.CommandTimeout(40); // Margen extendido de 60 segundos para evitar timeouts con Supabase
+            npgsqlOptions.CommandTimeout(40); // Margen de segundos para evitar timeouts de red con Supabase
         }
     ));
 
