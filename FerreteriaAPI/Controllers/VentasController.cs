@@ -67,63 +67,89 @@ public class VentasController : ControllerBase
 
             if (ventaDuplicada)
             {
-                return BadRequest("Se ha destinado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
+                return BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
             }
 
-            // Transacción limpia y directa (sin estrategias externas que causen conflictos)
-            using var transaction = await _context.Database.BeginTransactionAsync();
+            // =========================================================================
+            // SOLUCIÓN ARQUITECTÓNICA SENIOR: 
+            // Obtenemos los IDs de los productos para hacer una sola consulta masiva (Evita N+1)
+            // =========================================================================
+            var productoIds = dto.DetalleVenta.Select(d => d.IdProducto).Distinct().ToList();
+            var productosDb = await _context.Productos
+                .Where(p => productoIds.Contains(p.Id))
+                .ToListAsync();
 
-            var nuevaVenta = new Ventas
+            // =========================================================================
+            // PROTECCIÓN DE NPGSQL:
+            // Envolvemos la transacción en la estrategia de ejecución de EF Core.
+            // Esto previene definitivamente el error "Exception while reading from stream".
+            // =========================================================================
+            var strategy = _context.Database.CreateExecutionStrategy();
+
+            return await strategy.ExecuteAsync(async () =>
             {
-                IdCliente = dto.IdCliente,
-                MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
-                Fecha = DateTime.UtcNow,
-                DetalleVenta = new List<DetalleVenta>()
-            };
+                using var transaction = await _context.Database.BeginTransactionAsync();
+                try
+                {
+                    var nuevaVenta = new Ventas
+                    {
+                        IdCliente = dto.IdCliente,
+                        MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
+                        Fecha = DateTime.UtcNow,
+                        DetalleVenta = new List<DetalleVenta>()
+                    };
 
-            decimal valorTotalCalculado = 0;
+                    decimal valorTotalCalculado = 0;
 
-            foreach (var itemDto in dto.DetalleVenta)
-            {
-                var producto = await _context.Productos.FindAsync(itemDto.IdProducto);
+                    foreach (var itemDto in dto.DetalleVenta)
+                    {
+                        // Buscamos en la lista en memoria que ya trajimos de la BD
+                        var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
 
-                if (producto == null)
+                        if (producto == null)
+                        {
+                            await transaction.RollbackAsync();
+                            return (ActionResult<Ventas>)NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
+                        }
+
+                        if (producto.Stock < itemDto.Cantidad)
+                        {
+                            await transaction.RollbackAsync();
+                            return (ActionResult<Ventas>)BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
+                        }
+
+                        valorTotalCalculado += producto.Precio * itemDto.Cantidad;
+
+                        // Al estar trackeado por la consulta previa, modificar la propiedad actualiza el estado solo
+                        producto.Stock -= itemDto.Cantidad;
+
+                        if (producto.Stock <= 10)
+                        {
+                            EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
+                        }
+
+                        nuevaVenta.DetalleVenta.Add(new DetalleVenta
+                        {
+                            IdProducto = itemDto.IdProducto,
+                            Cantidad = itemDto.Cantidad,
+                            PrecioUnitario = producto.Precio
+                        });
+                    }
+
+                    nuevaVenta.ValorTotal = valorTotalCalculado;
+
+                    _context.Ventas.Add(nuevaVenta);
+                    await _context.SaveChangesAsync();
+                    await transaction.CommitAsync();
+
+                    return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
+                }
+                catch
                 {
                     await transaction.RollbackAsync();
-                    return NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
+                    throw; // Propaga la excepción para que el strategy o el bloque externo la capture
                 }
-
-                if (producto.Stock < itemDto.Cantidad)
-                {
-                    await transaction.RollbackAsync();
-                    return BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
-                }
-
-                valorTotalCalculado += producto.Precio * itemDto.Cantidad;
-
-                producto.Stock -= itemDto.Cantidad;
-                _context.Productos.Update(producto);
-
-                if (producto.Stock <= 10)
-                {
-                    EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
-                }
-
-                nuevaVenta.DetalleVenta.Add(new DetalleVenta
-                {
-                    IdProducto = itemDto.IdProducto,
-                    Cantidad = itemDto.Cantidad,
-                    PrecioUnitario = producto.Precio
-                });
-            }
-
-            nuevaVenta.ValorTotal = valorTotalCalculado;
-
-            _context.Ventas.Add(nuevaVenta);
-            await _context.SaveChangesAsync();
-            await transaction.CommitAsync();
-
-            return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
+            });
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
         {
