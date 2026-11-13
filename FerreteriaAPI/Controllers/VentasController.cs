@@ -67,9 +67,10 @@ public class VentasController : ControllerBase
 
             if (ventaDuplicada)
             {
-                return BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
+                return BadRequest("Se ha destinado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
             }
 
+            // Transacción limpia y directa (sin estrategias externas que causen conflictos)
             using var transaction = await _context.Database.BeginTransactionAsync();
 
             var nuevaVenta = new Ventas
@@ -141,7 +142,7 @@ public class VentasController : ControllerBase
                 stackTrace = ex.StackTrace
             });
         }
-    } 
+    }
 
     // GET: api/Ventas/PorFecha?fecha=2026-09-30
     [HttpGet("PorFecha")]
