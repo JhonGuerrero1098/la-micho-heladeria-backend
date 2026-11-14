@@ -38,7 +38,13 @@ builder.Services.AddDbContext<FerreteriaContext>(options =>
         builder.Configuration.GetConnectionString("DefaultConnection"),
         npgsqlOptions =>
         {
-            npgsqlOptions.CommandTimeout(40); // Margen de segundos para evitar timeouts de red con Supabase
+            npgsqlOptions.CommandTimeout(60); // Margen de segundos para evitar timeouts de red con Supabase
+            npgsqlOptions.EnableRetryOnFailure(
+                maxRetryCount:5,
+                maxRetryDelay: TimeSpan.FromSeconds(10),
+                errorCodesToAdd: null
+
+            );
         }
     ));
 
