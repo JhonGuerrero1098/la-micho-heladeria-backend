@@ -76,28 +76,49 @@ public class ClientesController : ControllerBase
     {
         try
         {
-            // 1. Validación preventiva en memoria
+            // 1. Validación preventiva en memoria para evitar duplicados de cédula
             bool existe = await _context.Clientes
                 .AnyAsync(c => c.Cedula == cliente.Cedula);
 
             if (existe)
             {
-                return BadRequest("Ya existe un cliente registrado con esa cédula.");
+                // Retornamos 409 Conflict indicando explícitamente que no se creó por duplicidad
+                return Conflict(new
+                {
+                    exito = false,
+                    mensaje = "Ya existe un cliente registrado con esa cédula."
+                });
             }
 
             _context.Clientes.Add(cliente);
             await _context.SaveChangesAsync();
 
-            return CreatedAtAction("GetCliente", new { id = cliente.Id }, cliente);
+            // 2. Éxito rotundo: Retornamos 201 Created con estructura clara para el cliente/frontend
+            return CreatedAtAction(nameof(GetCliente), new { id = cliente.Id }, new
+            {
+                exito = true,
+                mensaje = "Cliente registrado con éxito.",
+                data = cliente
+            });
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
         {
-            // 2. Captura por si la base de datos frena un duplicado por concurrencia o reintento de red
-            return BadRequest(new { mensaje = "No se pudo registrar el cliente. Es posible que la cédula ya se encuentre registrada.", detalle = dbEx.InnerException?.Message });
+            // 3. Red de seguridad: Si la BD frena el duplicado por concurrencia (Unique Constraint)
+            return Conflict(new
+            {
+                exito = false,
+                mensaje = "No se pudo registrar el cliente. Es posible que la cédula ya se encuentre registrada.",
+                detalle = dbEx.InnerException?.Message
+            });
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
+            return StatusCode(500, new
+            {
+                exito = false,
+                mensaje = ex.Message,
+                detalle = ex.InnerException?.Message
+            });
         }
     }
 
