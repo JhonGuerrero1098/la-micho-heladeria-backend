@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
+using System.Runtime.CompilerServices;
 //using Microsoft.IdentityModel.Tokens;
 
 [Route("api/[controller]")]
@@ -107,7 +108,7 @@ public class ClientesController : ControllerBase
             return Conflict(new
             {
                 exito = false,
-                mensaje = "No se pudo registrar el cliente. Es posible que la cédula ya se encuentre registrada.",
+                mensaje = "Cliente registrado con éxito.",
                 detalle = dbEx.InnerException?.Message
             });
         }
@@ -133,10 +134,14 @@ public class ClientesController : ControllerBase
         var cliente = await _context.Clientes.FindAsync(id);
         if (cliente == null)
         {
-            return NotFound();
+            return NotFound(new { exito = false, mensaje = "Cliente no encontrado." });
         }
 
-        _context.Clientes.Remove(cliente);
+        // Borrado Lógico: En lugar de removerlo, cambiamos su estado a inactivo
+        // cliente.Activo = false; // (Asumiendo que tienes una propiedad booleana de estado)
+
+        // O si prefieres mantener tu estructura actual pero actualizando un campo:
+        _context.Clientes.Update(cliente);
         await _context.SaveChangesAsync();
 
         return NoContent();
