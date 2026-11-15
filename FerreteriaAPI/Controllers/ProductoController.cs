@@ -81,19 +81,48 @@ public class ProductosController : ControllerBase
                 producto.CodigoBarras = null;
             }
 
+            // 1. Validación preventiva en memoria para el nombre del producto
+            bool nombreExiste = await _context.Productos
+                .AnyAsync(p => p.Nombre.Trim().ToLower() == producto.Nombre.Trim().ToLower());
+
+            if (nombreExiste)
+            {
+                return Conflict(new
+                {
+                    exito = false,
+                    mensaje = "Ya existe un producto registrado con ese nombre."
+                });
+            }
+
             _context.Productos.Add(producto);
             await _context.SaveChangesAsync();
 
-            return CreatedAtAction("GetProducto", new { id = producto.Id }, producto);
+            // 2. Respuesta estructurada y limpia (201 Created)
+            return CreatedAtAction(nameof(GetProducto), new { id = producto.Id }, new
+            {
+                exito = true,
+                mensaje = "Producto registrado con éxito.",
+                data = producto
+            });
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
         {
-            // Si Supabase frena un código de barras repetido por el índice único
-            return BadRequest(new { mensaje = "No se pudo registrar el producto. El código de barras ya se encuentra registrado.", detalle = dbEx.InnerException?.Message });
+            // 3. Red de seguridad general para índices únicos (Nombre o Código de barras)
+            return Conflict(new
+            {
+                exito = false,
+                mensaje = "No se pudo registrar el producto. Es posible que el nombre o el código de barras ya se encuentren registrados.",
+                detalle = dbEx.InnerException?.Message
+            });
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
+            return StatusCode(500, new
+            {
+                exito = false,
+                mensaje = ex.Message,
+                detalle = ex.InnerException?.Message
+            });
         }
     }
 
