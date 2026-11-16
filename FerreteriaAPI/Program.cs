@@ -65,8 +65,9 @@ app.MapGet("/", async context =>
     await Task.CompletedTask;
 });
 
-app.UseCors("AngularPolicy");
+
 app.UseHttpsRedirection();
+app.UseCors("AngularPolicy");
 app.UseAuthorization();
 app.MapControllers();
 
