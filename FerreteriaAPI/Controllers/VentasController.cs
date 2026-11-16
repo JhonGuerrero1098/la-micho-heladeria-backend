@@ -177,20 +177,29 @@ public class VentasController : ControllerBase
     }
 
     // GET: api/Ventas/PorFecha?fecha=2026-09-30
-   
+
     [HttpGet("PorFecha")]
-    public async Task<ActionResult> GetVentasPorFecha([FromQuery] DateTime fecha)
+    public async Task<ActionResult> GetVentasPorFecha([FromQuery] string fecha)
     {
         try
         {
-            // Definimos el rango del día completo para evitar problemas con la hora exacta
-            var inicioDia = fecha.Date;
-            var finDia = inicioDia.AddDays(1);
+            // Intentamos parsear la fecha enviada desde Swagger / URL
+            if (!DateTime.TryParse(fecha, out var parsedDate))
+            {
+                return BadRequest(new
+                {
+                    exito = false,
+                    mensaje = "Formato de fecha inválido. Utilice el formato YYYY-MM-DD (ej: 2026-11-12)."
+                });
+            }
 
-            // Consultamos las ventas dentro de ese rango, incluyendo relaciones si es necesario
+            // Forzamos estrictamente el Kind a UTC para evitar el error de Npgsql
+            var inicioDia = DateTime.SpecifyKind(parsedDate.Date, DateTimeKind.Utc);
+            var finDia = DateTime.SpecifyKind(inicioDia.AddDays(1), DateTimeKind.Utc);
+
             var ventas = await _context.Ventas
-                .Include(v => v.IdClienteNavigation)       // Incluir datos del cliente si lo requieres
-                .Include(v => v.DetalleVenta)  // Incluir los productos de la venta
+                .Include(v => v.IdClienteNavigation)
+                .Include(v => v.DetalleVenta)
                     .ThenInclude(d => d.IdProductoNavigation)
                 .Where(v => v.Fecha >= inicioDia && v.Fecha < finDia)
                 .ToListAsync();
@@ -212,8 +221,6 @@ public class VentasController : ControllerBase
             });
         }
     }
-
-
     // GET: api/Ventas/ProductoMasVendido (Histórico General)
     [HttpGet("ProductoMasVendido")]
     public async Task<ActionResult> GetProductoMasVendido()
