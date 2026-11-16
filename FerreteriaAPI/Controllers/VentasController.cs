@@ -45,7 +45,7 @@ public class VentasController : ControllerBase
         // Validación inicial de los detalles
         if (dto.DetalleVenta == null || !dto.DetalleVenta.Any())
         {
-            return BadRequest("La venta debe incluir al menos un producto.");
+            return BadRequest(new { exito = false, mensaje = "La venta debe incluir al menos un producto." });
         }
 
         try
@@ -56,23 +56,23 @@ public class VentasController : ControllerBase
                 var clienteExiste = await _context.Clientes.AnyAsync(c => c.Id == dto.IdCliente.Value);
                 if (!clienteExiste)
                 {
-                    return NotFound($"El cliente con ID {dto.IdCliente.Value} no existe en la base de datos.");
+                    return NotFound(new { exito = false, mensaje = $"El cliente con ID {dto.IdCliente.Value} no existe en la base de datos." });
                 }
             }
 
-            // Validación preventiva de duplicados (últimos 5 segundos)
+            // 2. Validación preventiva de duplicados (últimos 5 segundos)
             var hacePoco = DateTime.UtcNow.AddSeconds(-5);
             bool ventaDuplicada = await _context.Ventas
                 .AnyAsync(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco);
 
             if (ventaDuplicada)
             {
-                return BadRequest("Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar.");
+                return Conflict(new { exito = false, mensaje = "Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar." });
             }
 
             // =========================================================================
-            // SOLUCIÓN ARQUITECTÓNICA SENIOR: 
-            // Obtenemos los IDs de los productos para hacer una sola consulta masiva (Evita N+1)
+            // ARQUITECTURA SENIOR - OPTIMIZACIÓN ANTI-N+1:
+            // Obtenemos los IDs de los productos para hacer una sola consulta masiva
             // =========================================================================
             var productoIds = dto.DetalleVenta.Select(d => d.IdProducto).Distinct().ToList();
             var productosDb = await _context.Productos
@@ -80,9 +80,8 @@ public class VentasController : ControllerBase
                 .ToListAsync();
 
             // =========================================================================
-            // PROTECCIÓN DE NPGSQL:
-            // Envolvemos la transacción en la estrategia de ejecución de EF Core.
-            // Esto previene definitivamente el error "Exception while reading from stream".
+            // PROTECCIÓN DE NPGSQL & RESILIENCIA:
+            // Estrategia de ejecución envolviendo la transacción atómica
             // =========================================================================
             var strategy = _context.Database.CreateExecutionStrategy();
 
@@ -109,18 +108,18 @@ public class VentasController : ControllerBase
                         if (producto == null)
                         {
                             await transaction.RollbackAsync();
-                            return (ActionResult<Ventas>)NotFound($"El producto con ID {itemDto.IdProducto} no existe.");
+                            return (ActionResult<Ventas>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
                         }
 
                         if (producto.Stock < itemDto.Cantidad)
                         {
                             await transaction.RollbackAsync();
-                            return (ActionResult<Ventas>)BadRequest($"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}");
+                            return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}" });
                         }
 
                         valorTotalCalculado += producto.Precio * itemDto.Cantidad;
 
-                        // Al estar trackeado por la consulta previa, modificar la propiedad actualiza el estado solo
+                        // Descontamos el stock localmente (el change tracker lo detectará)
                         producto.Stock -= itemDto.Cantidad;
 
                         if (producto.Stock <= 10)
@@ -142,12 +141,17 @@ public class VentasController : ControllerBase
                     await _context.SaveChangesAsync();
                     await transaction.CommitAsync();
 
-                    return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, nuevaVenta);
+                    return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, new
+                    {
+                        exito = true,
+                        mensaje = "Venta procesada con éxito.",
+                        data = nuevaVenta
+                    });
                 }
                 catch
                 {
                     await transaction.RollbackAsync();
-                    throw; // Propaga la excepción para que el strategy o el bloque externo la capture
+                    throw; // Propaga la excepción para que el strategy la reintente si es transitoria
                 }
             });
         }
@@ -155,6 +159,7 @@ public class VentasController : ControllerBase
         {
             return BadRequest(new
             {
+                exito = false,
                 mensaje = "Error de base de datos al procesar la venta.",
                 errorInterno = dbEx.InnerException?.Message ?? dbEx.Message
             });
@@ -163,6 +168,7 @@ public class VentasController : ControllerBase
         {
             return StatusCode(500, new
             {
+                exito = false,
                 mensaje = "Ocurrió un error inesperado al procesar la venta.",
                 errorInterno = ex.InnerException?.Message ?? ex.Message,
                 stackTrace = ex.StackTrace

@@ -101,7 +101,7 @@ public class ProductosController : ControllerBase
             return CreatedAtAction(nameof(GetProducto), new { id = producto.Id }, new
             {
                 exito = true,
-                mensaje = "Producto registrado con éxito.",
+                mensaje = "No se pudo registrar el producto. Es posible que el nombre o el código de barras ya se encuentren registrados.",
                 data = producto
             });
         }
@@ -111,7 +111,7 @@ public class ProductosController : ControllerBase
             return Conflict(new
             {
                 exito = false,
-                mensaje = "No se pudo registrar el producto. Es posible que el nombre o el código de barras ya se encuentren registrados.",
+                mensaje = "Producto registrado con éxito.",
                 detalle = dbEx.InnerException?.Message
             });
         }
