@@ -177,21 +177,42 @@ public class VentasController : ControllerBase
     }
 
     // GET: api/Ventas/PorFecha?fecha=2026-09-30
+   
     [HttpGet("PorFecha")]
-    public async Task<ActionResult<IEnumerable<Ventas>>> GetVentasPorFecha([FromQuery] DateTime fecha)
+    public async Task<ActionResult> GetVentasPorFecha([FromQuery] DateTime fecha)
     {
-        var inicioDia = fecha.Date;
-        var finDia = fecha.Date.AddDays(1).AddTicks(-1);
+        try
+        {
+            // Definimos el rango del día completo para evitar problemas con la hora exacta
+            var inicioDia = fecha.Date;
+            var finDia = inicioDia.AddDays(1);
 
-        var ventas = await _context.Ventas
-            .Where(v => v.Fecha >= inicioDia && v.Fecha <= finDia)
-            .Include(v => v.IdClienteNavigation)
-            .Include(v => v.DetalleVenta)
-                .ThenInclude(d => d.IdProductoNavigation)
-            .ToListAsync();
+            // Consultamos las ventas dentro de ese rango, incluyendo relaciones si es necesario
+            var ventas = await _context.Ventas
+                .Include(v => v.IdClienteNavigation)       // Incluir datos del cliente si lo requieres
+                .Include(v => v.DetalleVenta)  // Incluir los productos de la venta
+                    .ThenInclude(d => d.IdProductoNavigation)
+                .Where(v => v.Fecha >= inicioDia && v.Fecha < finDia)
+                .ToListAsync();
 
-        return ventas;
+            return Ok(new
+            {
+                exito = true,
+                totalRegistros = ventas.Count,
+                data = ventas
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new
+            {
+                exito = false,
+                mensaje = "Ocurrió un error al consultar las ventas por fecha.",
+                detalle = ex.InnerException?.Message ?? ex.Message
+            });
+        }
     }
+
 
     // GET: api/Ventas/ProductoMasVendido (Histórico General)
     [HttpGet("ProductoMasVendido")]
