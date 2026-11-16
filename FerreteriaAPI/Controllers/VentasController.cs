@@ -213,6 +213,7 @@ public class VentasController : ControllerBase
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"ERROR REAL EN DB: {ex.InnerException.Message ?? ex.Message}");
             return StatusCode(500, new
             {
                 exito = false,
