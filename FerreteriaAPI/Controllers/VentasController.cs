@@ -17,6 +17,7 @@ public class VentasController : ControllerBase
     public async Task<ActionResult<IEnumerable<Ventas>>> GetVentas()
     {
         return await _context.Ventas
+            .AsNoTracking()
             .Include(v => v.IdClienteNavigation)
             .Include(v => v.DetalleVenta)
                 .ThenInclude(d => d.IdProductoNavigation)
@@ -27,6 +28,7 @@ public class VentasController : ControllerBase
     public async Task<ActionResult<Ventas>> GetVenta(int id)
     {
         var venta = await _context.Ventas
+            .AsNoTracking()
             .Include(v => v.IdClienteNavigation)
             .Include(v => v.DetalleVenta)
                 .ThenInclude(d => d.IdProductoNavigation)
@@ -70,30 +72,61 @@ public class VentasController : ControllerBase
                 return Conflict(new { exito = false, mensaje = "Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar." });
             }
 
-            // =========================================================================
-            // ARQUITECTURA SENIOR - OPTIMIZACIÓN ANTI-N+1:
-            // Obtenemos los IDs de los productos para hacer una sola consulta masiva
-            // =========================================================================
+            // Normalizamos el método de pago a uno de los tres valores soportados
+            var metodoPago = NormalizarMetodoPago(dto.MetodoPago);
+            if (metodoPago == null)
+            {
+                return BadRequest(new { exito = false, mensaje = $"Método de pago no válido: '{dto.MetodoPago}'. Use Efectivo, Transferencia o Datáfono." });
+            }
+
             var productoIds = dto.DetalleVenta.Select(d => d.IdProducto).Distinct().ToList();
-            var productosDb = await _context.Productos
-                .Where(p => productoIds.Contains(p.Id))
-                .ToListAsync();
 
             // =========================================================================
             // PROTECCIÓN DE NPGSQL & RESILIENCIA:
-            // Estrategia de ejecución envolviendo la transacción atómica
+            // Cada reintento de la estrategia arranca desde cero (contexto limpio, productos
+            // recién leídos) para no descontar el stock dos veces ni insertar la venta duplicada.
             // =========================================================================
             var strategy = _context.Database.CreateExecutionStrategy();
 
             return await strategy.ExecuteAsync(async () =>
             {
-                using var transaction = await _context.Database.BeginTransactionAsync();
+                _context.ChangeTracker.Clear();
+
+                // Una sola consulta para todos los productos (anti N+1)
+                var productosDb = await _context.Productos
+                    .Where(p => productoIds.Contains(p.Id))
+                    .ToListAsync();
+
+                // Validaciones antes de abrir la transacción: no hay nada que revertir si fallan
+                foreach (var itemDto in dto.DetalleVenta)
+                {
+                    var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
+
+                    if (producto == null)
+                    {
+                        return (ActionResult<Ventas>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
+                    }
+
+                    if (itemDto.Cantidad <= 0)
+                    {
+                        return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"La cantidad para el producto {producto.Nombre} debe ser mayor a cero." });
+                    }
+
+                    // Suma las líneas repetidas del mismo producto para no vender más de lo que hay
+                    var cantidadSolicitada = dto.DetalleVenta.Where(d => d.IdProducto == itemDto.IdProducto).Sum(d => d.Cantidad);
+                    if (producto.Stock < cantidadSolicitada)
+                    {
+                        return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {cantidadSolicitada}" });
+                    }
+                }
+
+                await using var transaction = await _context.Database.BeginTransactionAsync();
                 try
                 {
                     var nuevaVenta = new Ventas
                     {
                         IdCliente = dto.IdCliente,
-                        MetodoPago = !string.IsNullOrEmpty(dto.MetodoPago) ? dto.MetodoPago : "Efectivo",
+                        MetodoPago = metodoPago,
                         Fecha = DateTime.UtcNow,
                         DetalleVenta = new List<DetalleVenta>()
                     };
@@ -102,20 +135,7 @@ public class VentasController : ControllerBase
 
                     foreach (var itemDto in dto.DetalleVenta)
                     {
-                        // Buscamos en la lista en memoria que ya trajimos de la BD
-                        var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
-
-                        if (producto == null)
-                        {
-                            await transaction.RollbackAsync();
-                            return (ActionResult<Ventas>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
-                        }
-
-                        if (producto.Stock < itemDto.Cantidad)
-                        {
-                            await transaction.RollbackAsync();
-                            return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {itemDto.Cantidad}" });
-                        }
+                        var producto = productosDb.First(p => p.Id == itemDto.IdProducto);
 
                         valorTotalCalculado += producto.Precio * itemDto.Cantidad;
 
@@ -150,8 +170,8 @@ public class VentasController : ControllerBase
                 }
                 catch
                 {
-                    await transaction.RollbackAsync();
-                    throw; // Propaga la excepción para que el strategy la reintente si es transitoria
+                    await RollbackSeguroAsync(transaction);
+                    throw; // Propaga la excepción original para que el strategy la reintente si es transitoria
                 }
             });
         }
@@ -198,6 +218,7 @@ public class VentasController : ControllerBase
             var finDia = DateTime.SpecifyKind(inicioDia.AddDays(1), DateTimeKind.Utc);
 
             var ventas = await _context.Ventas
+                .AsNoTracking()
                 .Include(v => v.IdClienteNavigation)
                 .Include(v => v.DetalleVenta)
                     .ThenInclude(d => d.IdProductoNavigation)
@@ -213,7 +234,7 @@ public class VentasController : ControllerBase
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ERROR REAL EN DB: {ex.InnerException.Message ?? ex.Message}");
+            Console.WriteLine($"ERROR REAL EN DB: {ex.InnerException?.Message ?? ex.Message}");
             return StatusCode(500, new
             {
                 exito = false,
@@ -227,6 +248,7 @@ public class VentasController : ControllerBase
     public async Task<ActionResult> GetProductoMasVendido()
     {
         var productoMasVendido = await _context.DetalleVenta
+            .AsNoTracking()
             .GroupBy(d => d.IdProducto)
             .Select(g => new
             {
@@ -241,7 +263,7 @@ public class VentasController : ControllerBase
             return NotFound("No hay registros de ventas suficientes para determinar el producto más vendido.");
         }
 
-        var productoInfo = await _context.Productos.FindAsync(productoMasVendido.IdProducto);
+        var productoInfo = await _context.Productos.AsNoTracking().FirstOrDefaultAsync(p => p.Id == productoMasVendido.IdProducto);
 
         return Ok(new
         {
@@ -256,10 +278,12 @@ public class VentasController : ControllerBase
     public async Task<ActionResult> GetProductoMasVendidoDiario([FromQuery] DateTime? fecha)
     {
         DateTime fechaBuscada = fecha ?? DateTime.Today;
-        var inicioDia = fechaBuscada.Date;
-        var finDia = fechaBuscada.Date.AddDays(1).AddTicks(-1);
+        // Npgsql exige Kind=UTC para columnas timestamptz (igual que en PorFecha)
+        var inicioDia = DateTime.SpecifyKind(fechaBuscada.Date, DateTimeKind.Utc);
+        var finDia = inicioDia.AddDays(1).AddTicks(-1);
 
         var productoMasVendido = await _context.DetalleVenta
+            .AsNoTracking()
             .Join(_context.Ventas,
                   d => d.IdVenta,
                   v => v.Id,
@@ -279,7 +303,7 @@ public class VentasController : ControllerBase
             return NotFound("No hay registros de ventas suficientes para la fecha seleccionada.");
         }
 
-        var productoInfo = await _context.Productos.FindAsync(productoMasVendido.IdProducto);
+        var productoInfo = await _context.Productos.AsNoTracking().FirstOrDefaultAsync(p => p.Id == productoMasVendido.IdProducto);
 
         return Ok(new
         {
@@ -289,6 +313,40 @@ public class VentasController : ControllerBase
             totalUnidadesVendidas = productoMasVendido.TotalCantidadVendida
         });
     }
+    // Si la conexión ya se cayó (timeout de red con Supabase), Npgsql dispone la transacción y
+    // RollbackAsync lanza ObjectDisposedException, ocultando el error real. Postgres revierte
+    // por su cuenta al perder la conexión, así que aquí basta con ignorar ese fallo.
+    private static async Task RollbackSeguroAsync(Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction)
+    {
+        try
+        {
+            await transaction.RollbackAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Rollback no ejecutado (conexión ya cerrada): {ex.Message}");
+        }
+    }
+
+    // Devuelve el nombre canónico del método de pago, o null si no es uno de los soportados.
+    // Sin método de pago se asume Efectivo (comportamiento anterior).
+    private static string? NormalizarMetodoPago(string? metodoPago)
+    {
+        if (string.IsNullOrWhiteSpace(metodoPago))
+        {
+            return "Efectivo";
+        }
+
+        var valor = metodoPago.Trim().ToLowerInvariant().Replace('á', 'a');
+        return valor switch
+        {
+            "efectivo" => "Efectivo",
+            "transferencia" => "Transferencia",
+            "datafono" => "Datáfono",
+            _ => null
+        };
+    }
+
     private void EnviarSmsAlAdmin (string nombreProducto, int stockActual)
     {
         string mensaje = $"Stock insuficiente para el producto {nombreProducto}";

@@ -19,14 +19,14 @@ namespace FerreteriaAPI.Controllers
         [HttpGet]
         public async Task<ActionResult<IEnumerable<Roles>>> GetRoles()
         {
-            return await _context.Roles.ToListAsync();
+            return await _context.Roles.AsNoTracking().ToListAsync();
         }
 
         
         [HttpGet("{id}")]
         public async Task<ActionResult<Roles>> GetRol(int id)
         {
-            var rol = await _context.Roles.FindAsync(id);
+            var rol = await _context.Roles.AsNoTracking().FirstOrDefaultAsync(r => r.IdRol == id);
 
             if (rol == null)
             {

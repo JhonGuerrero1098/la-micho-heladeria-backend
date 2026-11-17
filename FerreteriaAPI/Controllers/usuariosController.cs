@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
+using Npgsql;
 
 namespace FerreteriaAPI.Controllers
 {
@@ -22,7 +23,7 @@ namespace FerreteriaAPI.Controllers
         [HttpGet]
         public async Task<ActionResult<IEnumerable<Usuarios>>> GetUsuarios()
         {
-            return await _context.Usuarios.ToListAsync();
+            return await _context.Usuarios.AsNoTracking().ToListAsync();
         }
 
         // POST: api/Usuarios/Registro
@@ -32,7 +33,7 @@ namespace FerreteriaAPI.Controllers
             // BLOQUEO DE SEGURIDAD: Nadie puede crear un Superusuario (Rol 3) desde la app web/API
             if (dto.IdRol == 3)
             {
-                return BadRequest("Por seguridad, las cuentas con rol de Superusuario solo pueden ser creadas directamente desde la base de datos.");
+                return BadRequest(new { exito = false, mensaje = "Por seguridad, las cuentas con rol de Superusuario solo pueden ser creadas directamente desde la base de datos." });
             }
 
             try
@@ -44,7 +45,7 @@ namespace FerreteriaAPI.Controllers
                 var existeCorreo = await _context.Usuarios.AnyAsync(u => u.Email.ToLower() == emailLimpio);
                 if (existeCorreo)
                 {
-                    return BadRequest("Ya existe un usuario registrado con este correo electrónico.");
+                    return BadRequest(new { exito = false, mensaje = "El registro ya existe: hay un usuario registrado con este correo electrónico." });
                 }
 
                 var nuevoUsuario = new Usuarios
@@ -62,16 +63,20 @@ namespace FerreteriaAPI.Controllers
                 _context.Usuarios.Add(nuevoUsuario);
                 await _context.SaveChangesAsync();
 
-                return Ok(new { mensaje = "Usuario registrado exitosamente", usuario = nuevoUsuario });
+                return Ok(new { exito = true, mensaje = "Usuario creado con éxito.", usuario = nuevoUsuario });
             }
-            catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+            catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
             {
-                // Captura definitiva por si un reintento de red o concurrencia intenta duplicar el correo en Supabase
-                return BadRequest(new { mensaje = "No se pudo registrar el usuario. El correo electrónico ya se encuentra registrado.", detalle = dbEx.InnerException?.Message });
+                // Captura definitiva (23505) por si un reintento de red o concurrencia intenta duplicar el correo en Supabase
+                return BadRequest(new { exito = false, mensaje = "El registro ya existe: el correo electrónico ya se encuentra registrado." });
+            }
+            catch (DbUpdateException dbEx)
+            {
+                return BadRequest(new { exito = false, mensaje = "No se pudo registrar el usuario.", detalle = dbEx.InnerException?.Message ?? dbEx.Message });
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { mensaje = "Ocurrió un error al registrar el usuario.", detalle = ex.InnerException?.Message ?? ex.Message });
+                return StatusCode(500, new { exito = false, mensaje = "Ocurrió un error al registrar el usuario.", detalle = ex.InnerException?.Message ?? ex.Message });
             }
         }
 

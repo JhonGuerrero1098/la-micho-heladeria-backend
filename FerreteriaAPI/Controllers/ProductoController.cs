@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
+using Npgsql;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -18,6 +19,7 @@ public class ProductosController : ControllerBase
     {
         // Solo retorna los productos que estén activos (Activo == true)
         return await _context.Productos
+            .AsNoTracking()
             .Where(p => p.Activo)
             .Include(p => p.IdCategoriaNavigation)
             .ToListAsync();
@@ -27,6 +29,7 @@ public class ProductosController : ControllerBase
     public async Task<ActionResult<Producto>> GetProducto(int id)
     {
         var producto = await _context.Productos
+            .AsNoTracking()
             .Include(p => p.IdCategoriaNavigation)
             .FirstOrDefaultAsync(p => p.Id == id && p.Activo);
 
@@ -81,17 +84,34 @@ public class ProductosController : ControllerBase
                 producto.CodigoBarras = null;
             }
 
-            // 1. Validación preventiva en memoria para el nombre del producto
+            // 1. Validación previa de duplicados (nombre y código de barras)
+            var nombreLimpio = producto.Nombre.Trim().ToLower();
             bool nombreExiste = await _context.Productos
-                .AnyAsync(p => p.Nombre.Trim().ToLower() == producto.Nombre.Trim().ToLower());
+                .AnyAsync(p => p.Nombre.Trim().ToLower() == nombreLimpio);
 
             if (nombreExiste)
             {
-                return Conflict(new
+                return BadRequest(new
                 {
                     exito = false,
-                    mensaje = "Ya existe un producto registrado con ese nombre."
+                    mensaje = "El registro ya existe: hay un producto registrado con ese nombre."
                 });
+            }
+
+            if (producto.CodigoBarras != null)
+            {
+                producto.CodigoBarras = producto.CodigoBarras.Trim();
+                bool codigoExiste = await _context.Productos
+                    .AnyAsync(p => p.CodigoBarras == producto.CodigoBarras);
+
+                if (codigoExiste)
+                {
+                    return BadRequest(new
+                    {
+                        exito = false,
+                        mensaje = "El registro ya existe: hay un producto registrado con ese código de barras."
+                    });
+                }
             }
 
             _context.Productos.Add(producto);
@@ -101,18 +121,26 @@ public class ProductosController : ControllerBase
             return CreatedAtAction(nameof(GetProducto), new { id = producto.Id }, new
             {
                 exito = true,
-                mensaje = "No se pudo registrar el producto. Es posible que el nombre o el código de barras ya se encuentren registrados.",
+                mensaje = "Producto creado con éxito.",
                 data = producto
             });
         }
-        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+        catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
         {
-            // 3. Red de seguridad general para índices únicos (Nombre o Código de barras)
-            return Conflict(new
+            // 3. Red de seguridad (23505): doble clic o reintento de red que ya había insertado el producto
+            return BadRequest(new
             {
                 exito = false,
-                mensaje = "Producto registrado con éxito.",
-                detalle = dbEx.InnerException?.Message
+                mensaje = "El registro ya existe: el nombre o el código de barras ya se encuentran registrados."
+            });
+        }
+        catch (DbUpdateException dbEx)
+        {
+            return BadRequest(new
+            {
+                exito = false,
+                mensaje = "No se pudo registrar el producto.",
+                detalle = dbEx.InnerException?.Message ?? dbEx.Message
             });
         }
         catch (Exception ex)

@@ -2,6 +2,7 @@
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
 using System.Runtime.CompilerServices;
+using Npgsql;
 //using Microsoft.IdentityModel.Tokens;
 
 [Route("api/[controller]")]
@@ -18,14 +19,14 @@ public class ClientesController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<Clientes>>> GetClientes()
     {
-        return await _context.Clientes.ToListAsync();
+        return await _context.Clientes.AsNoTracking().ToListAsync();
     }
 
     // GET: api/Clientes/5
     [HttpGet("{id}")]
     public async Task<ActionResult<Clientes>> GetCliente(int id)
     {
-        var cliente = await _context.Clientes.FindAsync(id);
+        var cliente = await _context.Clientes.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
         if (cliente == null)
         {
             return NotFound();
@@ -77,17 +78,17 @@ public class ClientesController : ControllerBase
     {
         try
         {
-            // 1. Validación preventiva en memoria para evitar duplicados de cédula
+            // 1. Validación previa para evitar duplicados de cédula
+            cliente.Cedula = cliente.Cedula.Trim();
             bool existe = await _context.Clientes
                 .AnyAsync(c => c.Cedula == cliente.Cedula);
 
             if (existe)
             {
-                // Retornamos 409 Conflict indicando explícitamente que no se creó por duplicidad
-                return Conflict(new
+                return BadRequest(new
                 {
                     exito = false,
-                    mensaje = "Ya existe un cliente registrado con esa cédula."
+                    mensaje = "El registro ya existe: hay un cliente registrado con esa cédula."
                 });
             }
 
@@ -98,18 +99,26 @@ public class ClientesController : ControllerBase
             return CreatedAtAction(nameof(GetCliente), new { id = cliente.Id }, new
             {
                 exito = true,
-                mensaje = "Cliente registrado con éxito.",
+                mensaje = "Cliente creado con éxito.",
                 data = cliente
             });
         }
-        catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
+        catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
         {
-            // 3. Red de seguridad: Si la BD frena el duplicado por concurrencia (Unique Constraint)
-            return Conflict(new
+            // 3. Red de seguridad (23505): doble clic o reintento de red que ya había insertado el cliente
+            return BadRequest(new
             {
                 exito = false,
-                mensaje = "Cliente registrado con éxito.",
-                detalle = dbEx.InnerException?.Message
+                mensaje = "El registro ya existe: hay un cliente registrado con esos datos."
+            });
+        }
+        catch (DbUpdateException dbEx)
+        {
+            return BadRequest(new
+            {
+                exito = false,
+                mensaje = "No se pudo registrar el cliente.",
+                detalle = dbEx.InnerException?.Message ?? dbEx.Message
             });
         }
         catch (Exception ex)

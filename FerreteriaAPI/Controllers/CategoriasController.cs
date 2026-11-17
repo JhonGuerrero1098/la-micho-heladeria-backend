@@ -16,7 +16,7 @@ public class CategoriasController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<IEnumerable<Categorias>>> GetCategorias()
     {
-        return await _context.Categoria.ToListAsync();
+        return await _context.Categoria.AsNoTracking().ToListAsync();
     }
 
     [HttpGet("{id}")]
@@ -24,7 +24,7 @@ public class CategoriasController : ControllerBase
     {
         try
         {
-            var categoria = await _context.Categoria.FindAsync(id);
+            var categoria = await _context.Categoria.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
 
             if (categoria == null)
             {
