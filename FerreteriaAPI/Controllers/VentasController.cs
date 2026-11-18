@@ -200,15 +200,19 @@ public class VentasController : ControllerBase
         }
     }
 
-    // GET: api/Ventas/PorFecha?fecha=2026-09-30
-
+    // GET: api/Ventas/PorFecha?fecha=2026-09-30  (sin fecha = hoy en Colombia)
+    // Devuelve un arreglo plano de ventas (vacío si no hay), que es lo que espera el frontend.
     [HttpGet("PorFecha")]
-    public async Task<ActionResult> GetVentasPorFecha([FromQuery] string fecha)
+    public async Task<ActionResult> GetVentasPorFecha([FromQuery] string? fecha)
     {
         try
         {
-            // Intentamos parsear la fecha enviada desde Swagger / URL
-            if (!DateTime.TryParse(fecha, out var parsedDate))
+            DateTime diaLocal;
+            if (string.IsNullOrWhiteSpace(fecha))
+            {
+                diaLocal = HoyEnColombia();
+            }
+            else if (!DateTime.TryParse(fecha, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out diaLocal))
             {
                 return BadRequest(new
                 {
@@ -217,24 +221,44 @@ public class VentasController : ControllerBase
                 });
             }
 
-            // Forzamos estrictamente el Kind a UTC para evitar el error de Npgsql
-            var inicioDia = DateTime.SpecifyKind(parsedDate.Date, DateTimeKind.Utc);
-            var finDia = DateTime.SpecifyKind(inicioDia.AddDays(1), DateTimeKind.Utc);
+            var (inicioDia, finDia) = RangoDiaUtc(diaLocal);
 
+            // Proyección directa: solo las columnas que usa el reporte, sin cargar entidades completas
             var ventas = await _context.Ventas
                 .AsNoTracking()
-                .Include(v => v.IdClienteNavigation)
-                .Include(v => v.DetalleVenta)
-                    .ThenInclude(d => d.IdProductoNavigation)
                 .Where(v => v.Fecha >= inicioDia && v.Fecha < finDia)
+                .OrderBy(v => v.Fecha)
+                .Select(v => new
+                {
+                    v.Id,
+                    Fecha = AHoraColombia(v.Fecha),
+                    v.ValorTotal,
+                    v.IdCliente,
+                    v.MetodoPago,
+                    IdClienteNavigation = v.IdClienteNavigation == null ? null : new
+                    {
+                        v.IdClienteNavigation.Id,
+                        v.IdClienteNavigation.Nombre,
+                        v.IdClienteNavigation.Cedula
+                    },
+                    DetalleVenta = v.DetalleVenta.Select(d => new
+                    {
+                        d.IdDetalle,
+                        d.IdVenta,
+                        d.IdProducto,
+                        d.Cantidad,
+                        d.PrecioUnitario,
+                        IdProductoNavigation = d.IdProductoNavigation == null ? null : new
+                        {
+                            d.IdProductoNavigation.Id,
+                            d.IdProductoNavigation.Nombre,
+                            d.IdProductoNavigation.Precio
+                        }
+                    }).ToList()
+                })
                 .ToListAsync();
 
-            return Ok(new
-            {
-                exito = true,
-                totalRegistros = ventas.Count,
-                data = ventas
-            });
+            return Ok(ventas);
         }
         catch (Exception ex)
         {
@@ -281,10 +305,9 @@ public class VentasController : ControllerBase
     [HttpGet("ProductoMasVendidoDiario")]
     public async Task<ActionResult> GetProductoMasVendidoDiario([FromQuery] DateTime? fecha)
     {
-        DateTime fechaBuscada = fecha ?? DateTime.Today;
-        // Npgsql exige Kind=UTC para columnas timestamptz (igual que en PorFecha)
-        var inicioDia = DateTime.SpecifyKind(fechaBuscada.Date, DateTimeKind.Utc);
-        var finDia = inicioDia.AddDays(1).AddTicks(-1);
+        DateTime fechaBuscada = fecha ?? HoyEnColombia();
+        var (inicioDia, finDiaExclusivo) = RangoDiaUtc(fechaBuscada);
+        var finDia = finDiaExclusivo.AddTicks(-1);
 
         var productoMasVendido = await _context.DetalleVenta
             .AsNoTracking()
@@ -317,6 +340,38 @@ public class VentasController : ControllerBase
             totalUnidadesVendidas = productoMasVendido.TotalCantidadVendida
         });
     }
+    // =========================================================================
+    // ZONA HORARIA: las ventas se guardan en UTC, pero "el día" del negocio es el de Colombia
+    // (UTC-5, sin horario de verano). Si el sistema no trae la base de zonas, se usa -5 fijo.
+    // =========================================================================
+    private static readonly TimeZoneInfo ZonaColombia = ObtenerZonaColombia();
+
+    private static TimeZoneInfo ObtenerZonaColombia()
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("America/Bogota");
+        }
+        catch (Exception)
+        {
+            return TimeZoneInfo.CreateCustomTimeZone("Colombia", TimeSpan.FromHours(-5), "Colombia", "Colombia");
+        }
+    }
+
+    private static DateTime HoyEnColombia() => TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ZonaColombia).Date;
+
+    // Convierte un día local de Colombia al rango UTC [inicio, fin) que Npgsql acepta (Kind=UTC)
+    private static (DateTime inicioUtc, DateTime finUtc) RangoDiaUtc(DateTime diaLocal)
+    {
+        var inicioLocal = DateTime.SpecifyKind(diaLocal.Date, DateTimeKind.Unspecified);
+        var inicioUtc = TimeZoneInfo.ConvertTimeToUtc(inicioLocal, ZonaColombia);
+        return (inicioUtc, inicioUtc.AddDays(1));
+    }
+
+    // Hora local de Colombia para mostrar en el reporte (el frontend toma la hora del texto de la fecha)
+    private static DateTime AHoraColombia(DateTime fechaUtc) =>
+        TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(fechaUtc, DateTimeKind.Utc), ZonaColombia);
+
     // Si la conexión ya se cayó (timeout de red con Supabase), Npgsql dispone la transacción y
     // RollbackAsync lanza ObjectDisposedException, ocultando el error real. Postgres revierte
     // por su cuenta al perder la conexión, así que aquí basta con ignorar ese fallo.
