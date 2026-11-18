@@ -17,16 +17,23 @@ public class ClientesController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<Clientes>>> GetClientes()
+    public async Task<ActionResult<IEnumerable<ClienteDto>>> GetClientes()
     {
-        return await _context.Clientes.AsNoTracking().ToListAsync();
+        return await _context.Clientes
+            .AsNoTracking()
+            .Select(c => new ClienteDto { Id = c.Id, Nombre = c.Nombre, Telefono = c.Telefono, Email = c.Email, Cedula = c.Cedula })
+            .ToListAsync();
     }
 
     // GET: api/Clientes/5
     [HttpGet("{id}")]
-    public async Task<ActionResult<Clientes>> GetCliente(int id)
+    public async Task<ActionResult<ClienteDto>> GetCliente(int id)
     {
-        var cliente = await _context.Clientes.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
+        var cliente = await _context.Clientes
+            .AsNoTracking()
+            .Where(c => c.Id == id)
+            .Select(c => new ClienteDto { Id = c.Id, Nombre = c.Nombre, Telefono = c.Telefono, Email = c.Email, Cedula = c.Cedula })
+            .FirstOrDefaultAsync();
         if (cliente == null)
         {
             return NotFound();

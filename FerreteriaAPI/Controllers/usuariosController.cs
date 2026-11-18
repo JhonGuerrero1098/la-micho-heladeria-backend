@@ -21,9 +21,21 @@ namespace FerreteriaAPI.Controllers
 
         // GET: api/Usuarios
         [HttpGet]
-        public async Task<ActionResult<IEnumerable<Usuarios>>> GetUsuarios()
+        public async Task<ActionResult<IEnumerable<UsuarioDto>>> GetUsuarios()
         {
-            return await _context.Usuarios.AsNoTracking().ToListAsync();
+            // Proyección: no se lee la columna del hash de la contraseña
+            return await _context.Usuarios
+                .AsNoTracking()
+                .Select(u => new UsuarioDto
+                {
+                    IdUsuario = u.IdUsuario,
+                    NombreCompleto = u.NombreCompleto,
+                    Email = u.Email,
+                    IdRol = u.IdRol,
+                    Estado = u.Estado,
+                    FechaRegistro = u.FechaRegistro
+                })
+                .ToListAsync();
         }
 
         // POST: api/Usuarios/Registro

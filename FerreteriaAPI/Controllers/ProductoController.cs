@@ -2,6 +2,7 @@
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
 using Npgsql;
+using System.Linq.Expressions;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -14,24 +15,45 @@ public class ProductosController : ControllerBase
         _context = context;
     }
 
+    // Proyección de lectura: solo columnas del producto y el nombre de su categoría
+    private static readonly Expression<Func<Producto, ProductoDto>> ProyeccionProducto = p => new ProductoDto
+    {
+        Id = p.Id,
+        Nombre = p.Nombre,
+        Precio = p.Precio,
+        Stock = p.Stock,
+        Descripcion = p.Descripcion,
+        IdCategoria = p.IdCategoria,
+        IdProveedor = p.IdProveedor,
+        CodigoBarras = p.CodigoBarras,
+        Activo = p.Activo,
+        IdCategoriaNavigation = p.IdCategoriaNavigation == null ? null : new CategoriaResumenDto
+        {
+            Id = p.IdCategoriaNavigation.Id,
+            NombreCategoria = p.IdCategoriaNavigation.NombreCategoria,
+            Descripcion = p.IdCategoriaNavigation.Descripcion
+        }
+    };
+
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<Producto>>> GetProductos()
+    public async Task<ActionResult<IEnumerable<ProductoDto>>> GetProductos()
     {
         // Solo retorna los productos que estén activos (Activo == true)
         return await _context.Productos
             .AsNoTracking()
             .Where(p => p.Activo)
-            .Include(p => p.IdCategoriaNavigation)
+            .Select(ProyeccionProducto)
             .ToListAsync();
     }
 
     [HttpGet("{id}")]
-    public async Task<ActionResult<Producto>> GetProducto(int id)
+    public async Task<ActionResult<ProductoDto>> GetProducto(int id)
     {
         var producto = await _context.Productos
             .AsNoTracking()
-            .Include(p => p.IdCategoriaNavigation)
-            .FirstOrDefaultAsync(p => p.Id == id && p.Activo);
+            .Where(p => p.Id == id && p.Activo)
+            .Select(ProyeccionProducto)
+            .FirstOrDefaultAsync();
 
         if (producto == null)
         {

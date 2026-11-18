@@ -15,6 +15,9 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.ReferenceHandler = System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
     });
 
+// Compresión Brotli/Gzip de las respuestas JSON (menos bytes entre Render y el navegador)
+builder.Services.AddResponseCompression(options => options.EnableForHttps = true);
+
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -52,6 +55,8 @@ builder.Services.AddDbContext<FerreteriaContext>(options =>
 builder.Services.AddScoped<IPasswordHasher<Usuarios>, PasswordHasher<Usuarios>>();
 
 var app = builder.Build();
+
+app.UseResponseCompression();
 
 // Configure the HTTP request pipeline.
 // Habilitamos Swagger de manera global para que funcione perfecto en Render

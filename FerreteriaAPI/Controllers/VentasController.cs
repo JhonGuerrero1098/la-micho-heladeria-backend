@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
+using System.Linq.Expressions;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -13,26 +14,54 @@ public class VentasController : ControllerBase
         _context = context;
     }
 
+    // Proyección compartida por los GET de ventas: una sola consulta que trae solo las columnas
+    // que se muestran (sin entidades completas de cliente/producto). Fecha en hora de Colombia.
+    private static readonly Expression<Func<Ventas, VentaDto>> ProyeccionVenta = v => new VentaDto
+    {
+        Id = v.Id,
+        Fecha = AHoraColombia(v.Fecha),
+        ValorTotal = v.ValorTotal,
+        IdCliente = v.IdCliente,
+        MetodoPago = v.MetodoPago,
+        IdClienteNavigation = v.IdClienteNavigation == null ? null : new ClienteResumenDto
+        {
+            Id = v.IdClienteNavigation.Id,
+            Nombre = v.IdClienteNavigation.Nombre,
+            Cedula = v.IdClienteNavigation.Cedula
+        },
+        DetalleVenta = v.DetalleVenta.Select(d => new DetalleVentaDto
+        {
+            IdDetalle = d.IdDetalle,
+            IdVenta = d.IdVenta,
+            IdProducto = d.IdProducto,
+            Cantidad = d.Cantidad,
+            PrecioUnitario = d.PrecioUnitario,
+            IdProductoNavigation = d.IdProductoNavigation == null ? null : new ProductoResumenDto
+            {
+                Id = d.IdProductoNavigation.Id,
+                Nombre = d.IdProductoNavigation.Nombre,
+                Precio = d.IdProductoNavigation.Precio
+            }
+        }).ToList()
+    };
+
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<Ventas>>> GetVentas()
+    public async Task<ActionResult<IEnumerable<VentaDto>>> GetVentas()
     {
         return await _context.Ventas
             .AsNoTracking()
-            .Include(v => v.IdClienteNavigation)
-            .Include(v => v.DetalleVenta)
-                .ThenInclude(d => d.IdProductoNavigation)
+            .Select(ProyeccionVenta)
             .ToListAsync();
     }
 
     [HttpGet("{id}")]
-    public async Task<ActionResult<Ventas>> GetVenta(int id)
+    public async Task<ActionResult<VentaDto>> GetVenta(int id)
     {
         var venta = await _context.Ventas
             .AsNoTracking()
-            .Include(v => v.IdClienteNavigation)
-            .Include(v => v.DetalleVenta)
-                .ThenInclude(d => d.IdProductoNavigation)
-            .FirstOrDefaultAsync(v => v.Id == id);
+            .Where(v => v.Id == id)
+            .Select(ProyeccionVenta)
+            .FirstOrDefaultAsync();
 
         if (venta == null)
         {
@@ -228,34 +257,7 @@ public class VentasController : ControllerBase
                 .AsNoTracking()
                 .Where(v => v.Fecha >= inicioDia && v.Fecha < finDia)
                 .OrderBy(v => v.Fecha)
-                .Select(v => new
-                {
-                    v.Id,
-                    Fecha = AHoraColombia(v.Fecha),
-                    v.ValorTotal,
-                    v.IdCliente,
-                    v.MetodoPago,
-                    IdClienteNavigation = v.IdClienteNavigation == null ? null : new
-                    {
-                        v.IdClienteNavigation.Id,
-                        v.IdClienteNavigation.Nombre,
-                        v.IdClienteNavigation.Cedula
-                    },
-                    DetalleVenta = v.DetalleVenta.Select(d => new
-                    {
-                        d.IdDetalle,
-                        d.IdVenta,
-                        d.IdProducto,
-                        d.Cantidad,
-                        d.PrecioUnitario,
-                        IdProductoNavigation = d.IdProductoNavigation == null ? null : new
-                        {
-                            d.IdProductoNavigation.Id,
-                            d.IdProductoNavigation.Nombre,
-                            d.IdProductoNavigation.Precio
-                        }
-                    }).ToList()
-                })
+                .Select(ProyeccionVenta)
                 .ToListAsync();
 
             return Ok(ventas);
@@ -284,6 +286,16 @@ public class VentasController : ControllerBase
                 TotalCantidadVendida = g.Sum(d => d.Cantidad)
             })
             .OrderByDescending(x => x.TotalCantidadVendida)
+            .Take(1)
+            // Se une con productos en la misma consulta (antes eran dos viajes a la base)
+            .Join(_context.Productos,
+                  x => x.IdProducto,
+                  p => p.Id,
+                  (x, p) => new
+                  {
+                      Producto = new ProductoResumenDto { Id = p.Id, Nombre = p.Nombre, Precio = p.Precio },
+                      x.TotalCantidadVendida
+                  })
             .FirstOrDefaultAsync();
 
         if (productoMasVendido == null)
@@ -291,12 +303,10 @@ public class VentasController : ControllerBase
             return NotFound("No hay registros de ventas suficientes para determinar el producto más vendido.");
         }
 
-        var productoInfo = await _context.Productos.AsNoTracking().FirstOrDefaultAsync(p => p.Id == productoMasVendido.IdProducto);
-
         return Ok(new
         {
             mensaje = "Producto más vendido de la ferretería (General)",
-            producto = productoInfo,
+            producto = productoMasVendido.Producto,
             totalUnidadesVendidas = productoMasVendido.TotalCantidadVendida
         });
     }
@@ -323,6 +333,16 @@ public class VentasController : ControllerBase
                 TotalCantidadVendida = g.Sum(x => x.Detalle.Cantidad)
             })
             .OrderByDescending(x => x.TotalCantidadVendida)
+            .Take(1)
+            // Se une con productos en la misma consulta (antes eran dos viajes a la base)
+            .Join(_context.Productos,
+                  x => x.IdProducto,
+                  p => p.Id,
+                  (x, p) => new
+                  {
+                      Producto = new ProductoResumenDto { Id = p.Id, Nombre = p.Nombre, Precio = p.Precio },
+                      x.TotalCantidadVendida
+                  })
             .FirstOrDefaultAsync();
 
         if (productoMasVendido == null)
@@ -330,13 +350,11 @@ public class VentasController : ControllerBase
             return NotFound("No hay registros de ventas suficientes para la fecha seleccionada.");
         }
 
-        var productoInfo = await _context.Productos.AsNoTracking().FirstOrDefaultAsync(p => p.Id == productoMasVendido.IdProducto);
-
         return Ok(new
         {
             mensaje = "Producto más vendido del día",
             fechaConsulta = fechaBuscada.ToString("yyyy-MM-dd"),
-            producto = productoInfo,
+            producto = productoMasVendido.Producto,
             totalUnidadesVendidas = productoMasVendido.TotalCantidadVendida
         });
     }
