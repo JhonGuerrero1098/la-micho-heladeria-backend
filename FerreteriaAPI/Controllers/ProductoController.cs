@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
+using FerreteriaAPI.Services;
 using Npgsql;
 using System.Linq.Expressions;
 
@@ -166,8 +167,21 @@ public class ProductosController : ControllerBase
                 }
             }
 
+            producto.Id = 0; // El id siempre lo genera la base
             _context.Productos.Add(producto);
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
+            {
+                // Secuencia de productos.id por detrás de los datos: se sincroniza y se reintenta una vez
+                await SecuenciasIds.SincronizarAsync(_context, "productos");
+                _context.Entry(producto).State = EntityState.Detached;
+                producto.Id = 0;
+                _context.Productos.Add(producto);
+                await _context.SaveChangesAsync();
+            }
 
             // 2. Respuesta estructurada y limpia (201 Created)
             return CreatedAtAction(nameof(GetProducto), new { id = producto.Id }, new

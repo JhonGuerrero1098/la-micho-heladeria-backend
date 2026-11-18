@@ -1,7 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
-
+using FerreteriaAPI.Services;
 using Npgsql;
 //using Microsoft.IdentityModel.Tokens;
 
@@ -127,12 +127,12 @@ public class ClientesController : ControllerBase
             {
                 await _context.SaveChangesAsync();
             }
-            catch (DbUpdateException dbEx) when (EsLlavePrimariaDuplicada(dbEx))
+            catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
             {
                 // La secuencia del id quedó por detrás de los datos (p. ej. tras migrar registros con id
                 // explícito a Supabase): cada INSERT generaba un id que ya existe y respondía "ya existe".
                 // Se sincroniza la secuencia con el máximo id y se reintenta una sola vez.
-                await SincronizarSecuenciaIdAsync();
+                await SecuenciasIds.SincronizarAsync(_context, "clientes");
                 _context.Entry(cliente).State = EntityState.Detached;
                 cliente.Id = 0;
                 _context.Clientes.Add(cliente);
@@ -223,15 +223,6 @@ public class ClientesController : ControllerBase
             mensaje = $"El registro ya existe: la cédula {existente.Cedula} pertenece al cliente \"{existente.Nombre}\".",
             data = existente
         });
-
-    private static bool EsLlavePrimariaDuplicada(DbUpdateException dbEx) =>
-        dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } pg
-        && (pg.ConstraintName?.EndsWith("_pkey", StringComparison.OrdinalIgnoreCase) ?? false);
-
-    // Lleva la secuencia/identidad de clientes.id al siguiente valor libre (sirve para serial e identity)
-    private Task SincronizarSecuenciaIdAsync() =>
-        _context.Database.ExecuteSqlRawAsync(
-            "SELECT setval(pg_get_serial_sequence('clientes', 'id'), COALESCE((SELECT MAX(id) FROM clientes), 0) + 1, false)");
 
     private static string DescribirRestriccion(string? restriccion)
     {

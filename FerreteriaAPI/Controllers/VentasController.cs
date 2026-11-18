@@ -169,7 +169,7 @@ public class VentasController : ControllerBase
             // =========================================================================
             var strategy = _context.Database.CreateExecutionStrategy();
 
-            return await strategy.ExecuteAsync(async () =>
+            Func<Task<ActionResult<VentaDto>>> procesarVenta = async () =>
             {
                 _context.ChangeTracker.Clear();
 
@@ -318,7 +318,21 @@ public class VentasController : ControllerBase
                     await RollbackSeguroAsync(transaction);
                     throw; // Propaga la excepción original para que el strategy la reintente si es transitoria
                 }
-            });
+            };
+
+            try
+            {
+                return await strategy.ExecuteAsync(procesarVenta);
+            }
+            catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
+            {
+                // Secuencia de ventas.id o detalleventa.iddetalle por detrás de los datos migrados: la
+                // transacción ya se revirtió por completo (venta, detalle, stock y clave de idempotencia),
+                // así que se sincronizan ambas secuencias y se procesa la venta una sola vez más.
+                await SecuenciasIds.SincronizarAsync(_context, "ventas");
+                await SecuenciasIds.SincronizarAsync(_context, "detalleventa");
+                return await strategy.ExecuteAsync(procesarVenta);
+            }
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
         {
