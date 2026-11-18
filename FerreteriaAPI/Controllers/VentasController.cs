@@ -1,7 +1,12 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using FerreteriaAPI.Models;
+using FerreteriaAPI.Services;
 using System.Linq.Expressions;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 [Route("api/[controller]")]
 [ApiController]
@@ -70,8 +75,14 @@ public class VentasController : ControllerBase
 
         return venta;
     }
+    // POST: api/Ventas
+    // Cabecera opcional X-Idempotency-Key (UUID). Si esa clave ya produjo una venta en los últimos
+    // 15 minutos, se devuelve la misma respuesta guardada (con Idempotent-Replayed: true) sin volver
+    // a ejecutar la transacción: un reenvío por fallo de red nunca duplica la venta ni el descuento de stock.
     [HttpPost]
-    public async Task<ActionResult<VentaDto>> PostVenta([FromBody] VentaCreateDto dto)
+    public async Task<ActionResult<VentaDto>> PostVenta(
+        [FromBody] VentaCreateDto dto,
+        [FromHeader(Name = IdempotenciaVentas.Cabecera)] string? claveIdempotenciaTexto)
     {
         // Validación inicial de los detalles
         if (dto.DetalleVenta == null || !dto.DetalleVenta.Any())
@@ -79,8 +90,38 @@ public class VentasController : ControllerBase
             return BadRequest(new { exito = false, mensaje = "La venta debe incluir al menos un producto." });
         }
 
+        Guid? claveIdempotencia = null;
+        if (!string.IsNullOrWhiteSpace(claveIdempotenciaTexto))
+        {
+            if (!Guid.TryParse(claveIdempotenciaTexto, out var claveParseada) || claveParseada == Guid.Empty)
+            {
+                return BadRequest(new { exito = false, mensaje = $"La cabecera {IdempotenciaVentas.Cabecera} debe ser un UUID válido." });
+            }
+            claveIdempotencia = claveParseada;
+        }
+
+        // Normalizamos el método de pago a uno de los tres valores soportados
+        var metodoPago = NormalizarMetodoPago(dto.MetodoPago);
+        if (metodoPago == null)
+        {
+            return BadRequest(new { exito = false, mensaje = $"Método de pago no válido: '{dto.MetodoPago}'. Use Efectivo, Transferencia o Datáfono." });
+        }
+
+        var firmaSolicitud = FirmaDetalle(dto.DetalleVenta.Select(d => (d.IdProducto, d.Cantidad)));
+        var huellaSolicitud = CalcularHuella(dto.IdCliente, metodoPago, firmaSolicitud);
+
         try
         {
+            // 0. Idempotencia (camino rápido): si la clave ya tiene una venta guardada, se repite su respuesta
+            if (claveIdempotencia.HasValue)
+            {
+                var registroPrevio = await BuscarClaveVigenteAsync(claveIdempotencia.Value);
+                if (registroPrevio != null)
+                {
+                    return RepetirRespuesta(registroPrevio, huellaSolicitud);
+                }
+            }
+
             // 1. Validar si el cliente existe (si se envió un IdCliente). Se guarda su resumen
             //    para devolverlo en la respuesta sin otra consulta.
             ClienteResumenDto? clienteResumen = null;
@@ -97,29 +138,24 @@ public class VentasController : ControllerBase
                 }
             }
 
-            // 2. Validación preventiva de duplicados (últimos 5 segundos): solo se rechaza si coinciden
-            //    el cliente Y los mismos productos/cantidades. Antes bastaba el mismo cliente, así que dos
-            //    ventas de mostrador (sin cliente) seguidas respondían 409 aunque fueran ventas distintas.
-            var hacePoco = DateTime.UtcNow.AddSeconds(-5);
-            var firmaSolicitud = FirmaDetalle(dto.DetalleVenta.Select(d => (d.IdProducto, d.Cantidad)));
-            var detallesRecientes = await _context.Ventas
-                .AsNoTracking()
-                .Where(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco)
-                .Select(v => v.DetalleVenta.Select(d => new { d.IdProducto, d.Cantidad }).ToList())
-                .ToListAsync();
-            bool ventaDuplicada = detallesRecientes
-                .Any(r => FirmaDetalle(r.Select(d => (d.IdProducto, d.Cantidad))) == firmaSolicitud);
-
-            if (ventaDuplicada)
+            // 2. Solo para clientes que NO envían clave (versiones anteriores del frontend): heurística de
+            //    duplicados de 5 segundos con el mismo cliente y los mismos productos/cantidades.
+            //    Con clave, la idempotencia ya cubre los reenvíos y esta regla bloquearía ventas legítimas.
+            if (!claveIdempotencia.HasValue)
             {
-                return Conflict(new { exito = false, mensaje = "Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar." });
-            }
+                var hacePoco = DateTime.UtcNow.AddSeconds(-5);
+                var detallesRecientes = await _context.Ventas
+                    .AsNoTracking()
+                    .Where(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco)
+                    .Select(v => v.DetalleVenta.Select(d => new { d.IdProducto, d.Cantidad }).ToList())
+                    .ToListAsync();
+                bool ventaDuplicada = detallesRecientes
+                    .Any(r => FirmaDetalle(r.Select(d => (d.IdProducto, d.Cantidad))) == firmaSolicitud);
 
-            // Normalizamos el método de pago a uno de los tres valores soportados
-            var metodoPago = NormalizarMetodoPago(dto.MetodoPago);
-            if (metodoPago == null)
-            {
-                return BadRequest(new { exito = false, mensaje = $"Método de pago no válido: '{dto.MetodoPago}'. Use Efectivo, Transferencia o Datáfono." });
+                if (ventaDuplicada)
+                {
+                    return Conflict(new { exito = false, mensaje = "Se ha detectado una venta idéntica procesada hace un momento. Por favor verifique el inventario antes de reintentar." });
+                }
             }
 
             var productoIds = dto.DetalleVenta.Select(d => d.IdProducto).Distinct().OrderBy(id => id).ToArray();
@@ -140,6 +176,30 @@ public class VentasController : ControllerBase
                 await using var transaction = await _context.Database.BeginTransactionAsync();
                 try
                 {
+                    // Reserva de la clave dentro de la MISMA transacción de la venta:
+                    // - Si otra petición con la misma clave está en curso, este INSERT espera a que termine.
+                    // - Si esa venta ya se confirmó (incluido un reintento de la estrategia después de un
+                    //   commit cuya confirmación se perdió por la red), el INSERT no inserta nada y se
+                    //   devuelve la respuesta guardada en lugar de vender otra vez.
+                    if (claveIdempotencia.HasValue)
+                    {
+                        var limite = DateTime.UtcNow - IdempotenciaVentas.Vigencia;
+                        await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $"DELETE FROM idempotencia_ventas WHERE clave = {claveIdempotencia.Value} AND creado_en < {limite}");
+
+                        var reservada = await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $"INSERT INTO idempotencia_ventas (clave, huella, creado_en) VALUES ({claveIdempotencia.Value}, {huellaSolicitud}, {DateTime.UtcNow}) ON CONFLICT (clave) DO NOTHING");
+
+                        if (reservada == 0)
+                        {
+                            await RollbackSeguroAsync(transaction);
+                            var registroPrevio = await BuscarClaveVigenteAsync(claveIdempotencia.Value);
+                            return registroPrevio != null
+                                ? RepetirRespuesta(registroPrevio, huellaSolicitud)
+                                : (ActionResult<VentaDto>)Conflict(new { exito = false, mensaje = "Esta venta se está procesando en otra petición. Espere un momento y verifique en Ventas del Día." });
+                        }
+                    }
+
                     // Una sola consulta para todos los productos (anti N+1), ordenada por id para evitar deadlocks
                     var productosDb = await _context.Productos
                         .FromSqlInterpolated($"SELECT * FROM productos WHERE id = ANY({productoIds}) ORDER BY id FOR UPDATE")
@@ -206,11 +266,9 @@ public class VentasController : ControllerBase
 
                     _context.Ventas.Add(nuevaVenta);
                     await _context.SaveChangesAsync();
-                    await transaction.CommitAsync();
 
-                    // Respuesta armada en memoria (sin volver a consultar: un fallo tras el commit haría que
-                    // la estrategia reintentara y duplicara la venta). Misma forma que GET api/Ventas/{id},
-                    // en lugar de serializar la entidad rastreada con todo su grafo de navegaciones.
+                    // Respuesta armada en memoria, misma forma que GET api/Ventas/{id}, en lugar de
+                    // serializar la entidad rastreada con todo su grafo de navegaciones.
                     var ventaRespuesta = new VentaDto
                     {
                         Id = nuevaVenta.Id,
@@ -234,14 +292,26 @@ public class VentasController : ControllerBase
                         }).ToList()
                     };
 
-                    return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, new
+                    var cuerpoRespuesta = new
                     {
                         exito = true,
                         mensaje = "Venta procesada con éxito.",
                         data = ventaRespuesta,
                         // Stock ya descontado: el POS lo aplica de inmediato sin esperar a recargar productos
                         productosActualizados = productosDb.Select(p => new { id = p.Id, stock = p.Stock }).ToList()
-                    });
+                    };
+
+                    // Se guarda la respuesta junto a la clave ANTES del commit: venta y clave se confirman juntas
+                    if (claveIdempotencia.HasValue)
+                    {
+                        var jsonRespuesta = JsonSerializer.Serialize(cuerpoRespuesta, OpcionesJson);
+                        await _context.Database.ExecuteSqlInterpolatedAsync(
+                            $"UPDATE idempotencia_ventas SET id_venta = {nuevaVenta.Id}, codigo_estado = {StatusCodes.Status201Created}, respuesta = {jsonRespuesta} WHERE clave = {claveIdempotencia.Value}");
+                    }
+
+                    await transaction.CommitAsync();
+
+                    return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, cuerpoRespuesta);
                 }
                 catch
                 {
@@ -468,6 +538,54 @@ public class VentasController : ControllerBase
         if (valor.StartsWith("transf")) return "Transferencia";
         if (valor.StartsWith("dat")) return "Datáfono";
         return null;
+    }
+
+    // =========================================================================
+    // IDEMPOTENCIA
+    // =========================================================================
+    private JsonSerializerOptions OpcionesJson =>
+        HttpContext.RequestServices.GetRequiredService<IOptions<JsonOptions>>().Value.JsonSerializerOptions;
+
+    // Registro con respuesta ya guardada y dentro de la vigencia (las claves vencidas se ignoran
+    // aunque la limpieza periódica todavía no las haya borrado)
+    private Task<IdempotenciaVenta?> BuscarClaveVigenteAsync(Guid clave)
+    {
+        var limite = DateTime.UtcNow - IdempotenciaVentas.Vigencia;
+        return _context.IdempotenciaVentas
+            .AsNoTracking()
+            .FirstOrDefaultAsync(i => i.Clave == clave && i.CreadoEn >= limite && i.CodigoEstado != null);
+    }
+
+    private ActionResult RepetirRespuesta(IdempotenciaVenta registro, string huellaSolicitud)
+    {
+        // Misma clave con otro carrito/cliente/método de pago: es un error del cliente, no un reenvío
+        if (registro.Huella != huellaSolicitud)
+        {
+            return UnprocessableEntity(new
+            {
+                exito = false,
+                mensaje = $"La clave {IdempotenciaVentas.Cabecera} ya se usó para una venta con otros datos. Genere una clave nueva para esta venta."
+            });
+        }
+
+        Response.Headers[IdempotenciaVentas.CabeceraRepeticion] = "true";
+        if (registro.IdVenta.HasValue)
+        {
+            Response.Headers.Location = Url.Action(nameof(GetVenta), new { id = registro.IdVenta.Value });
+        }
+
+        return new ContentResult
+        {
+            StatusCode = registro.CodigoEstado,
+            ContentType = "application/json; charset=utf-8",
+            Content = registro.Respuesta
+        };
+    }
+
+    private static string CalcularHuella(int? idCliente, string metodoPago, string firmaDetalle)
+    {
+        var texto = $"{idCliente?.ToString() ?? "-"}|{metodoPago}|{firmaDetalle}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(texto)));
     }
 
     // Firma de una venta: productos con sus cantidades sumadas, ordenados (independiente del orden de las líneas)

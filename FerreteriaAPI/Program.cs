@@ -1,4 +1,5 @@
 using FerreteriaAPI.Models;
+using FerreteriaAPI.Services;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -28,7 +29,9 @@ builder.Services.AddCors(options =>
     {
         policy.AllowAnyOrigin()
               .AllowAnyHeader()
-              .AllowAnyMethod();
+              .AllowAnyMethod()
+              // Permite que el frontend lea si la venta fue una repetición idempotente
+              .WithExposedHeaders(IdempotenciaVentas.CabeceraRepeticion);
     });
 });
 
@@ -53,6 +56,9 @@ builder.Services.AddDbContext<FerreteriaContext>(options =>
 
 // Hash de contraseñas (PBKDF2 con HMAC-SHA512, sal aleatoria por usuario)
 builder.Services.AddScoped<IPasswordHasher<Usuarios>, PasswordHasher<Usuarios>>();
+
+// Limpieza periódica de las claves de idempotencia de ventas (vencen a los 15 minutos)
+builder.Services.AddHostedService<LimpiezaIdempotenciaService>();
 
 var app = builder.Build();
 
@@ -91,5 +97,8 @@ app.UseHttpsRedirection();
 app.UseCors("AngularPolicy");
 app.UseAuthorization();
 app.MapControllers();
+
+// Crea la tabla idempotencia_ventas en Supabase si aún no existe
+await IdempotenciaVentas.AsegurarTablaAsync(app.Services, app.Logger);
 
 app.Run();
