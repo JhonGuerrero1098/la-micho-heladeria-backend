@@ -125,76 +125,81 @@ public class ProductosController : ControllerBase
 
     // POST: api/Productos
     [HttpPost]
-    public async Task<ActionResult<Producto>> PostProducto(Producto producto)
+    public async Task<ActionResult<ProductoDto>> PostProducto(Producto producto)
     {
-        try
+        producto.Activo = true; // Asegurar que nazca activo por defecto
+        producto.Nombre = (producto.Nombre ?? string.Empty).Trim();
+        // Código de barras vacío se guarda como NULL para que no cause conflictos
+        producto.CodigoBarras = string.IsNullOrWhiteSpace(producto.CodigoBarras) ? null : producto.CodigoBarras.Trim();
+
+        if (string.IsNullOrEmpty(producto.Nombre))
         {
-            producto.Activo = true; // Asegurar que nazca activo por defecto
+            return BadRequest(new { exito = false, mensaje = "El nombre del producto es obligatorio." });
+        }
 
-            // Si viene un código de barras vacío, lo guardamos como NULL para que no cause conflictos
-            if (string.IsNullOrWhiteSpace(producto.CodigoBarras))
+        var nombreLimpio = producto.Nombre.ToLower();
+
+        // Validación + inserción atómicas por nombre: una segunda petición idéntica casi simultánea
+        // espera a que la primera confirme y entonces encuentra el producto ya creado.
+        Func<Task<ActionResult<ProductoDto>>> registrar = async () =>
+        {
+            // Validación previa de duplicados (nombre y código de barras): consulta proyectada, sin rastreo
+            var existente = await _context.Productos
+                .AsNoTracking()
+                .Where(p => p.Nombre.Trim().ToLower() == nombreLimpio
+                         || (producto.CodigoBarras != null && p.CodigoBarras == producto.CodigoBarras))
+                .Select(ProyeccionProducto)
+                .FirstOrDefaultAsync();
+
+            if (existente != null)
             {
-                producto.CodigoBarras = null;
-            }
-
-            // 1. Validación previa de duplicados (nombre y código de barras)
-            var nombreLimpio = producto.Nombre.Trim().ToLower();
-            bool nombreExiste = await _context.Productos
-                .AnyAsync(p => p.Nombre.Trim().ToLower() == nombreLimpio);
-
-            if (nombreExiste)
-            {
-                return BadRequest(new
-                {
-                    exito = false,
-                    mensaje = "El registro ya existe: hay un producto registrado con ese nombre."
-                });
-            }
-
-            if (producto.CodigoBarras != null)
-            {
-                producto.CodigoBarras = producto.CodigoBarras.Trim();
-                bool codigoExiste = await _context.Productos
-                    .AnyAsync(p => p.CodigoBarras == producto.CodigoBarras);
-
-                if (codigoExiste)
-                {
-                    return BadRequest(new
-                    {
-                        exito = false,
-                        mensaje = "El registro ya existe: hay un producto registrado con ese código de barras."
-                    });
-                }
+                return RespuestaProductoExistente(existente, producto);
             }
 
             producto.Id = 0; // El id siempre lo genera la base
             _context.Productos.Add(producto);
-            try
-            {
-                await _context.SaveChangesAsync();
-            }
-            catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
-            {
-                // Secuencia de productos.id por detrás de los datos: se sincroniza y se reintenta una vez
-                await SecuenciasIds.SincronizarAsync(_context, "productos");
-                _context.Entry(producto).State = EntityState.Detached;
-                producto.Id = 0;
-                _context.Productos.Add(producto);
-                await _context.SaveChangesAsync();
-            }
+            await _context.SaveChangesAsync();
 
-            // 2. Respuesta estructurada y limpia (201 Created)
             return CreatedAtAction(nameof(GetProducto), new { id = producto.Id }, new
             {
                 exito = true,
                 mensaje = "Producto creado con éxito.",
                 data = AProductoDto(producto)
             });
+        };
+
+        try
+        {
+            try
+            {
+                return await RegistroAtomico.EjecutarAsync(_context, $"productos:{nombreLimpio}", registrar);
+            }
+            catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
+            {
+                // Secuencia de productos.id por detrás de los datos: la transacción ya se revirtió;
+                // se sincroniza la secuencia y se reintenta una vez
+                await SecuenciasIds.SincronizarAsync(_context, "productos");
+                return await RegistroAtomico.EjecutarAsync(_context, $"productos:{nombreLimpio}", registrar);
+            }
         }
         catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
         {
-            // 3. Red de seguridad (23505): doble clic o reintento de red que ya había insertado el producto
-            return BadRequest(new
+            // Red de seguridad (23505): un reintento de conexión que repitió un INSERT ya confirmado, o un
+            // código de barras que choca con otro producto
+            _context.ChangeTracker.Clear();
+            var existente = await _context.Productos
+                .AsNoTracking()
+                .Where(p => p.Nombre.Trim().ToLower() == nombreLimpio
+                         || (producto.CodigoBarras != null && p.CodigoBarras == producto.CodigoBarras))
+                .Select(ProyeccionProducto)
+                .FirstOrDefaultAsync();
+
+            if (existente != null)
+            {
+                return RespuestaProductoExistente(existente, producto);
+            }
+
+            return Conflict(new
             {
                 exito = false,
                 mensaje = "El registro ya existe: el nombre o el código de barras ya se encuentran registrados."
@@ -235,6 +240,38 @@ public class ProductosController : ControllerBase
         await _context.SaveChangesAsync();
 
         return Ok(new { exito = true, mensaje = "Producto eliminado con éxito.", id });
+    }
+
+    // Petición repetida con los mismos datos (doble envío): 200 con el producto ya guardado, sin error.
+    // Mismo nombre/código con otros datos, o producto eliminado: 409 con un mensaje claro.
+    private ActionResult<ProductoDto> RespuestaProductoExistente(ProductoDto existente, Producto solicitado)
+    {
+        bool mismosDatos = existente.Activo
+            && string.Equals(existente.Nombre.Trim(), solicitado.Nombre, StringComparison.OrdinalIgnoreCase)
+            && existente.Precio == solicitado.Precio
+            && existente.IdCategoria == solicitado.IdCategoria;
+
+        if (mismosDatos)
+        {
+            return Ok(new
+            {
+                exito = true,
+                yaExistia = true,
+                mensaje = $"El producto \"{existente.Nombre}\" ya estaba registrado.",
+                data = existente
+            });
+        }
+
+        string motivo;
+        if (!existente.Activo)
+            motivo = $"hay un producto eliminado (inactivo) con el nombre \"{existente.Nombre}\"";
+        else if (solicitado.CodigoBarras != null && existente.CodigoBarras == solicitado.CodigoBarras
+                 && !string.Equals(existente.Nombre.Trim(), solicitado.Nombre, StringComparison.OrdinalIgnoreCase))
+            motivo = $"el código de barras pertenece al producto \"{existente.Nombre}\"";
+        else
+            motivo = $"ya hay un producto registrado con el nombre \"{existente.Nombre}\"";
+
+        return Conflict(new { exito = false, mensaje = $"El registro ya existe: {motivo}.", data = existente });
     }
 
     private bool ProductoExists(int id)

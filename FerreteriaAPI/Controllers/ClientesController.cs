@@ -113,31 +113,19 @@ public class ClientesController : ControllerBase
             return BadRequest(new { exito = false, mensaje = "El nombre y la cédula del cliente son obligatorios." });
         }
 
-        try
+        // Validación + inserción atómicas por cédula: una segunda petición idéntica espera a la primera
+        Func<Task<ActionResult<ClienteDto>>> registrar = async () =>
         {
-            // 1. Validación previa: una sola consulta ligera (sin rastreo, solo 5 columnas, LIMIT 1)
+            // Validación previa: una sola consulta ligera (sin rastreo, solo 5 columnas, LIMIT 1)
             var existente = await BuscarPorCedulaAsync(cliente.Cedula);
             if (existente != null)
             {
-                return ConflictoCedula(existente);
+                return RespuestaClienteExistente(existente, cliente);
             }
 
+            cliente.Id = 0;
             _context.Clientes.Add(cliente);
-            try
-            {
-                await _context.SaveChangesAsync();
-            }
-            catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
-            {
-                // La secuencia del id quedó por detrás de los datos (p. ej. tras migrar registros con id
-                // explícito a Supabase): cada INSERT generaba un id que ya existe y respondía "ya existe".
-                // Se sincroniza la secuencia con el máximo id y se reintenta una sola vez.
-                await SecuenciasIds.SincronizarAsync(_context, "clientes");
-                _context.Entry(cliente).State = EntityState.Detached;
-                cliente.Id = 0;
-                _context.Clientes.Add(cliente);
-                await _context.SaveChangesAsync();
-            }
+            await _context.SaveChangesAsync();
 
             return CreatedAtAction(nameof(GetCliente), new { id = cliente.Id }, new
             {
@@ -145,27 +133,32 @@ public class ClientesController : ControllerBase
                 mensaje = "Cliente creado con éxito.",
                 data = AClienteDto(cliente)
             });
+        };
+
+        try
+        {
+            try
+            {
+                return await RegistroAtomico.EjecutarAsync(_context, $"clientes:{cliente.Cedula}", registrar);
+            }
+            catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
+            {
+                // La secuencia del id quedó por detrás de los datos (p. ej. tras migrar registros con id
+                // explícito a Supabase). La transacción ya se revirtió: se sincroniza y se reintenta una vez.
+                await SecuenciasIds.SincronizarAsync(_context, "clientes");
+                return await RegistroAtomico.EjecutarAsync(_context, $"clientes:{cliente.Cedula}", registrar);
+            }
         }
         catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } pg)
         {
             _context.ChangeTracker.Clear();
 
-            // Cédula duplicada que la validación previa no vio: o se registró en paralelo, o un reintento
-            // de conexión (EnableRetryOnFailure) repitió un INSERT que ya se había confirmado.
+            // Red de seguridad: cédula duplicada que la validación no vio (p. ej. un reintento de conexión
+            // que repitió un INSERT ya confirmado)
             var existente = await BuscarPorCedulaAsync(cliente.Cedula);
             if (existente != null)
             {
-                // Mismo nombre => es el mismo registro que acabamos de crear: se responde como creado
-                if (string.Equals(existente.Nombre.Trim(), cliente.Nombre, StringComparison.OrdinalIgnoreCase))
-                {
-                    return CreatedAtAction(nameof(GetCliente), new { id = existente.Id }, new
-                    {
-                        exito = true,
-                        mensaje = "Cliente creado con éxito.",
-                        data = existente
-                    });
-                }
-                return ConflictoCedula(existente);
+                return RespuestaClienteExistente(existente, cliente);
             }
 
             // Otra restricción única (email, teléfono, id...): se dice cuál en lugar de un mensaje genérico
@@ -215,6 +208,23 @@ public class ClientesController : ControllerBase
             .Where(c => c.Cedula == cedula)
             .Select(c => new ClienteDto { Id = c.Id, Nombre = c.Nombre, Telefono = c.Telefono, Email = c.Email, Cedula = c.Cedula })
             .FirstOrDefaultAsync();
+
+    // Petición repetida con los mismos datos (doble envío): 200 con el cliente ya guardado, sin error.
+    // Misma cédula con otro nombre: 409, es un conflicto real.
+    private ActionResult<ClienteDto> RespuestaClienteExistente(ClienteDto existente, Clientes solicitado)
+    {
+        if (string.Equals(existente.Nombre.Trim(), solicitado.Nombre, StringComparison.OrdinalIgnoreCase))
+        {
+            return Ok(new
+            {
+                exito = true,
+                yaExistia = true,
+                mensaje = $"El cliente \"{existente.Nombre}\" ya estaba registrado con la cédula {existente.Cedula}.",
+                data = existente
+            });
+        }
+        return ConflictoCedula(existente);
+    }
 
     private ConflictObjectResult ConflictoCedula(ClienteDto existente) =>
         Conflict(new
