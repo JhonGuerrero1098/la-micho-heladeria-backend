@@ -71,7 +71,7 @@ public class VentasController : ControllerBase
         return venta;
     }
     [HttpPost]
-    public async Task<ActionResult<Ventas>> PostVenta([FromBody] VentaCreateDto dto)
+    public async Task<ActionResult<VentaDto>> PostVenta([FromBody] VentaCreateDto dto)
     {
         // Validación inicial de los detalles
         if (dto.DetalleVenta == null || !dto.DetalleVenta.Any())
@@ -81,20 +81,34 @@ public class VentasController : ControllerBase
 
         try
         {
-            // 1. Validar si el cliente existe (si se envió un IdCliente)
+            // 1. Validar si el cliente existe (si se envió un IdCliente). Se guarda su resumen
+            //    para devolverlo en la respuesta sin otra consulta.
+            ClienteResumenDto? clienteResumen = null;
             if (dto.IdCliente.HasValue)
             {
-                var clienteExiste = await _context.Clientes.AnyAsync(c => c.Id == dto.IdCliente.Value);
-                if (!clienteExiste)
+                clienteResumen = await _context.Clientes
+                    .AsNoTracking()
+                    .Where(c => c.Id == dto.IdCliente.Value)
+                    .Select(c => new ClienteResumenDto { Id = c.Id, Nombre = c.Nombre, Cedula = c.Cedula })
+                    .FirstOrDefaultAsync();
+                if (clienteResumen == null)
                 {
                     return NotFound(new { exito = false, mensaje = $"El cliente con ID {dto.IdCliente.Value} no existe en la base de datos." });
                 }
             }
 
-            // 2. Validación preventiva de duplicados (últimos 5 segundos)
+            // 2. Validación preventiva de duplicados (últimos 5 segundos): solo se rechaza si coinciden
+            //    el cliente Y los mismos productos/cantidades. Antes bastaba el mismo cliente, así que dos
+            //    ventas de mostrador (sin cliente) seguidas respondían 409 aunque fueran ventas distintas.
             var hacePoco = DateTime.UtcNow.AddSeconds(-5);
-            bool ventaDuplicada = await _context.Ventas
-                .AnyAsync(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco);
+            var firmaSolicitud = FirmaDetalle(dto.DetalleVenta.Select(d => (d.IdProducto, d.Cantidad)));
+            var detallesRecientes = await _context.Ventas
+                .AsNoTracking()
+                .Where(v => v.IdCliente == dto.IdCliente && v.Fecha >= hacePoco)
+                .Select(v => v.DetalleVenta.Select(d => new { d.IdProducto, d.Cantidad }).ToList())
+                .ToListAsync();
+            bool ventaDuplicada = detallesRecientes
+                .Any(r => FirmaDetalle(r.Select(d => (d.IdProducto, d.Cantidad))) == firmaSolicitud);
 
             if (ventaDuplicada)
             {
@@ -138,13 +152,13 @@ public class VentasController : ControllerBase
                         if (producto == null || !producto.Activo)
                         {
                             await RollbackSeguroAsync(transaction);
-                            return (ActionResult<Ventas>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
+                            return (ActionResult<VentaDto>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
                         }
 
                         if (itemDto.Cantidad <= 0)
                         {
                             await RollbackSeguroAsync(transaction);
-                            return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"La cantidad para el producto {producto.Nombre} debe ser mayor a cero." });
+                            return (ActionResult<VentaDto>)BadRequest(new { exito = false, mensaje = $"La cantidad para el producto {producto.Nombre} debe ser mayor a cero." });
                         }
 
                         // Suma las líneas repetidas del mismo producto para no vender más de lo que hay
@@ -152,7 +166,7 @@ public class VentasController : ControllerBase
                         if (producto.Stock < cantidadSolicitada)
                         {
                             await RollbackSeguroAsync(transaction);
-                            return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {cantidadSolicitada}" });
+                            return (ActionResult<VentaDto>)BadRequest(new { exito = false, mensaje = $"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {cantidadSolicitada}" });
                         }
                     }
 
@@ -194,11 +208,39 @@ public class VentasController : ControllerBase
                     await _context.SaveChangesAsync();
                     await transaction.CommitAsync();
 
+                    // Respuesta armada en memoria (sin volver a consultar: un fallo tras el commit haría que
+                    // la estrategia reintentara y duplicara la venta). Misma forma que GET api/Ventas/{id},
+                    // en lugar de serializar la entidad rastreada con todo su grafo de navegaciones.
+                    var ventaRespuesta = new VentaDto
+                    {
+                        Id = nuevaVenta.Id,
+                        Fecha = AHoraColombia(nuevaVenta.Fecha),
+                        ValorTotal = nuevaVenta.ValorTotal,
+                        IdCliente = nuevaVenta.IdCliente,
+                        MetodoPago = nuevaVenta.MetodoPago,
+                        IdClienteNavigation = clienteResumen,
+                        DetalleVenta = nuevaVenta.DetalleVenta.Select(d =>
+                        {
+                            var producto = productosDb.First(p => p.Id == d.IdProducto);
+                            return new DetalleVentaDto
+                            {
+                                IdDetalle = d.IdDetalle,
+                                IdVenta = nuevaVenta.Id,
+                                IdProducto = d.IdProducto,
+                                Cantidad = d.Cantidad,
+                                PrecioUnitario = d.PrecioUnitario,
+                                IdProductoNavigation = new ProductoResumenDto { Id = producto.Id, Nombre = producto.Nombre, Precio = producto.Precio }
+                            };
+                        }).ToList()
+                    };
+
                     return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, new
                     {
                         exito = true,
                         mensaje = "Venta procesada con éxito.",
-                        data = nuevaVenta
+                        data = ventaRespuesta,
+                        // Stock ya descontado: el POS lo aplica de inmediato sin esperar a recargar productos
+                        productosActualizados = productosDb.Select(p => new { id = p.Id, stock = p.Stock }).ToList()
                     });
                 }
                 catch
@@ -427,6 +469,13 @@ public class VentasController : ControllerBase
         if (valor.StartsWith("dat")) return "Datáfono";
         return null;
     }
+
+    // Firma de una venta: productos con sus cantidades sumadas, ordenados (independiente del orden de las líneas)
+    private static string FirmaDetalle(IEnumerable<(int IdProducto, int Cantidad)> lineas) =>
+        string.Join(";", lineas
+            .GroupBy(l => l.IdProducto)
+            .OrderBy(g => g.Key)
+            .Select(g => $"{g.Key}x{g.Sum(l => l.Cantidad)}"));
 
     private void EnviarSmsAlAdmin (string nombreProducto, int stockActual)
     {

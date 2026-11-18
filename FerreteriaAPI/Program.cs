@@ -58,6 +58,22 @@ var app = builder.Build();
 
 app.UseResponseCompression();
 
+// Las respuestas de la API nunca deben salir de una caché (navegador, proxy de Render/CDN):
+// tras guardar, el frontend vuelve a pedir los listados y debe recibir siempre el estado actual.
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api"))
+    {
+        context.Response.OnStarting(() =>
+        {
+            context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            context.Response.Headers.Pragma = "no-cache";
+            return Task.CompletedTask;
+        });
+    }
+    await next();
+});
+
 // Configure the HTTP request pipeline.
 // Habilitamos Swagger de manera global para que funcione perfecto en Render
 app.UseSwagger();

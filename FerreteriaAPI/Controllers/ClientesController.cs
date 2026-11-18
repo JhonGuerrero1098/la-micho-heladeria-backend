@@ -66,6 +66,10 @@ public class ClientesController : ControllerBase
         {
             await _context.SaveChangesAsync();
         }
+        catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            return BadRequest(new { exito = false, mensaje = "Ya existe otro cliente registrado con el número de cédula ingresado." });
+        }
         catch (DbUpdateConcurrencyException)
         {
             if (!ClienteExists(id))
@@ -77,7 +81,14 @@ public class ClientesController : ControllerBase
                 throw;
             }
         }
-        return NoContent();
+
+        // 200 con el cliente actualizado (antes 204 sin cuerpo)
+        return Ok(new
+        {
+            exito = true,
+            mensaje = "Cliente actualizado con éxito.",
+            data = AClienteDto(cliente)
+        });
     }
 
     // POST: api/Clientes
@@ -108,7 +119,7 @@ public class ClientesController : ControllerBase
             {
                 exito = true,
                 mensaje = "Cliente creado con éxito.",
-                data = cliente
+                data = AClienteDto(cliente)
             });
         }
         catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
@@ -163,6 +174,10 @@ public class ClientesController : ControllerBase
 
         return NoContent();
     }
+
+    // Mismo formato que GET api/Clientes, para las respuestas de POST/PUT
+    private static ClienteDto AClienteDto(Clientes c) =>
+        new ClienteDto { Id = c.Id, Nombre = c.Nombre, Telefono = c.Telefono, Email = c.Email, Cedula = c.Cedula };
 
     private bool ClienteExists(int id)
     {

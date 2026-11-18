@@ -35,6 +35,9 @@ public class ProductosController : ControllerBase
         }
     };
 
+    // La misma proyección aplicada en memoria, para responder a POST/PUT con el producto ya guardado
+    private static readonly Func<Producto, ProductoDto> AProductoDto = ProyeccionProducto.Compile();
+
     [HttpGet]
     public async Task<ActionResult<IEnumerable<ProductoDto>>> GetProductos()
     {
@@ -110,7 +113,13 @@ public class ProductosController : ControllerBase
             });
         }
 
-        return NoContent();
+        // 200 con el producto actualizado (antes 204 sin cuerpo): el frontend puede refrescar la fila al instante
+        return Ok(new
+        {
+            exito = true,
+            mensaje = "Producto actualizado con éxito.",
+            data = AProductoDto(existente)
+        });
     }
 
     // POST: api/Productos
@@ -165,7 +174,7 @@ public class ProductosController : ControllerBase
             {
                 exito = true,
                 mensaje = "Producto creado con éxito.",
-                data = producto
+                data = AProductoDto(producto)
             });
         }
         catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
@@ -209,10 +218,9 @@ public class ProductosController : ControllerBase
 
         // Cambiamos el estado a inactivo en lugar de removerlo físicamente
         producto.Activo = false;
-        _context.Entry(producto).State = EntityState.Modified;
         await _context.SaveChangesAsync();
 
-        return NoContent();
+        return Ok(new { exito = true, mensaje = "Producto eliminado con éxito.", id });
     }
 
     private bool ProductoExists(int id)
