@@ -71,22 +71,43 @@ public class ProductosController : ControllerBase
             return BadRequest();
         }
 
-        _context.Entry(producto).State = EntityState.Modified;
+        var existente = await _context.Productos.FindAsync(id);
+        if (existente == null)
+        {
+            return NotFound();
+        }
+
+        // Se actualizan solo los campos del formulario de edición. CodigoBarras e IdProveedor no
+        // vienen en ese formulario: si llegan en null se conservan los valores guardados
+        // (antes cada edición los borraba). Un código de barras vacío ("") sí lo limpia.
+        existente.Nombre = producto.Nombre;
+        existente.Precio = producto.Precio;
+        existente.Stock = producto.Stock;
+        existente.Descripcion = producto.Descripcion;
+        existente.IdCategoria = producto.IdCategoria;
+        existente.Activo = producto.Activo;
+
+        if (producto.CodigoBarras != null)
+        {
+            existente.CodigoBarras = string.IsNullOrWhiteSpace(producto.CodigoBarras) ? null : producto.CodigoBarras.Trim();
+        }
+
+        if (producto.IdProveedor.HasValue)
+        {
+            existente.IdProveedor = producto.IdProveedor;
+        }
 
         try
         {
             await _context.SaveChangesAsync();
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateException dbEx) when (dbEx.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
         {
-            if (!ProductoExists(id))
+            return BadRequest(new
             {
-                return NotFound();
-            }
-            else
-            {
-                throw;
-            }
+                exito = false,
+                mensaje = "El registro ya existe: el nombre o el código de barras pertenecen a otro producto."
+            });
         }
 
         return NoContent();
