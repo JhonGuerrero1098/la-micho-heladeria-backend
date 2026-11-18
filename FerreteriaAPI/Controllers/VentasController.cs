@@ -79,12 +79,14 @@ public class VentasController : ControllerBase
                 return BadRequest(new { exito = false, mensaje = $"Método de pago no válido: '{dto.MetodoPago}'. Use Efectivo, Transferencia o Datáfono." });
             }
 
-            var productoIds = dto.DetalleVenta.Select(d => d.IdProducto).Distinct().ToList();
+            var productoIds = dto.DetalleVenta.Select(d => d.IdProducto).Distinct().OrderBy(id => id).ToArray();
 
             // =========================================================================
             // PROTECCIÓN DE NPGSQL & RESILIENCIA:
             // Cada reintento de la estrategia arranca desde cero (contexto limpio, productos
             // recién leídos) para no descontar el stock dos veces ni insertar la venta duplicada.
+            // Las filas de productos se bloquean (FOR UPDATE) hasta el commit para que dos cajas
+            // vendiendo a la vez no descuenten el mismo stock.
             // =========================================================================
             var strategy = _context.Database.CreateExecutionStrategy();
 
@@ -92,37 +94,39 @@ public class VentasController : ControllerBase
             {
                 _context.ChangeTracker.Clear();
 
-                // Una sola consulta para todos los productos (anti N+1)
-                var productosDb = await _context.Productos
-                    .Where(p => productoIds.Contains(p.Id))
-                    .ToListAsync();
-
-                // Validaciones antes de abrir la transacción: no hay nada que revertir si fallan
-                foreach (var itemDto in dto.DetalleVenta)
-                {
-                    var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
-
-                    if (producto == null)
-                    {
-                        return (ActionResult<Ventas>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
-                    }
-
-                    if (itemDto.Cantidad <= 0)
-                    {
-                        return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"La cantidad para el producto {producto.Nombre} debe ser mayor a cero." });
-                    }
-
-                    // Suma las líneas repetidas del mismo producto para no vender más de lo que hay
-                    var cantidadSolicitada = dto.DetalleVenta.Where(d => d.IdProducto == itemDto.IdProducto).Sum(d => d.Cantidad);
-                    if (producto.Stock < cantidadSolicitada)
-                    {
-                        return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {cantidadSolicitada}" });
-                    }
-                }
-
                 await using var transaction = await _context.Database.BeginTransactionAsync();
                 try
                 {
+                    // Una sola consulta para todos los productos (anti N+1), ordenada por id para evitar deadlocks
+                    var productosDb = await _context.Productos
+                        .FromSqlInterpolated($"SELECT * FROM productos WHERE id = ANY({productoIds}) ORDER BY id FOR UPDATE")
+                        .ToListAsync();
+
+                    foreach (var itemDto in dto.DetalleVenta)
+                    {
+                        var producto = productosDb.FirstOrDefault(p => p.Id == itemDto.IdProducto);
+
+                        if (producto == null || !producto.Activo)
+                        {
+                            await RollbackSeguroAsync(transaction);
+                            return (ActionResult<Ventas>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
+                        }
+
+                        if (itemDto.Cantidad <= 0)
+                        {
+                            await RollbackSeguroAsync(transaction);
+                            return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"La cantidad para el producto {producto.Nombre} debe ser mayor a cero." });
+                        }
+
+                        // Suma las líneas repetidas del mismo producto para no vender más de lo que hay
+                        var cantidadSolicitada = dto.DetalleVenta.Where(d => d.IdProducto == itemDto.IdProducto).Sum(d => d.Cantidad);
+                        if (producto.Stock < cantidadSolicitada)
+                        {
+                            await RollbackSeguroAsync(transaction);
+                            return (ActionResult<Ventas>)BadRequest(new { exito = false, mensaje = $"Stock insuficiente para el producto {producto.Nombre}. Stock actual: {producto.Stock}, solicitado: {cantidadSolicitada}" });
+                        }
+                    }
+
                     var nuevaVenta = new Ventas
                     {
                         IdCliente = dto.IdCliente,
@@ -337,14 +341,18 @@ public class VentasController : ControllerBase
             return "Efectivo";
         }
 
-        var valor = metodoPago.Trim().ToLowerInvariant().Replace('á', 'a');
-        return valor switch
-        {
-            "efectivo" => "Efectivo",
-            "transferencia" => "Transferencia",
-            "datafono" => "Datáfono",
-            _ => null
-        };
+        // Quita tildes (incluida la forma descompuesta "a" + acento) y pasa a minúsculas
+        var valor = new string(metodoPago.Trim().ToLowerInvariant()
+            .Normalize(System.Text.NormalizationForm.FormD)
+            .Where(c => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) != System.Globalization.UnicodeCategory.NonSpacingMark)
+            .ToArray());
+
+        // Se compara por prefijo para tolerar texto mal codificado (ej. "DatÃ¡fono" si el
+        // navegador leyó app.js con otro charset). Mismas reglas que el reporte del frontend.
+        if (valor.StartsWith("efect")) return "Efectivo";
+        if (valor.StartsWith("transf")) return "Transferencia";
+        if (valor.StartsWith("dat")) return "Datáfono";
+        return null;
     }
 
     private void EnviarSmsAlAdmin (string nombreProducto, int stockActual)

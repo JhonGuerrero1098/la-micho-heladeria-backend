@@ -45,6 +45,7 @@ public class ClientesController : ControllerBase
 
         // Validación al actualizar: Verificar que la cédula no pertenezca a OTRO cliente distinto
         var clienteExistente = await _context.Clientes
+            .AsNoTracking()
             .FirstOrDefaultAsync(c => c.Cedula == cliente.Cedula && c.Id != id);
 
         if (clienteExistente != null)
