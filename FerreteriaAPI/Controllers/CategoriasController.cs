@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
@@ -40,6 +41,8 @@ public class CategoriasController : ControllerBase
         }
     }
 
+    // Solo Administrador (1) o Superusuario (3): un Cajero no puede cambiar precios ni stock
+    [Authorize(Roles = "1,3")]
     [HttpPut("{id}")]
     public async Task<IActionResult> PutCategorias(int id, Categorias categorias)
     {
@@ -69,6 +72,8 @@ public class CategoriasController : ControllerBase
         return NoContent();
     }
 
+    // Solo Administrador (1) o Superusuario (3): un Cajero no puede cambiar precios ni stock
+    [Authorize(Roles = "1,3")]
     [HttpPost]
     public async Task<ActionResult<Categorias>> PostCategorias(Categorias categorias)
     {

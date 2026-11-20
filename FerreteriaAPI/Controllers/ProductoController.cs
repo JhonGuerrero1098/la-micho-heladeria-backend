@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
 using FerreteriaAPI.Services;
@@ -67,6 +68,8 @@ public class ProductosController : ControllerBase
         return producto;
     }
 
+    // Solo Administrador (1) o Superusuario (3): un Cajero no puede cambiar precios ni stock
+    [Authorize(Roles = "1,3")]
     [HttpPut("{id}")]
     public async Task<IActionResult> PutProducto(int id, Producto producto)
     {
@@ -127,6 +130,8 @@ public class ProductosController : ControllerBase
     }
 
     // POST: api/Productos
+    // Solo Administrador (1) o Superusuario (3): un Cajero no puede cambiar precios ni stock
+    [Authorize(Roles = "1,3")]
     [HttpPost]
     public async Task<ActionResult<ProductoDto>> PostProducto(Producto producto)
     {
@@ -241,6 +246,8 @@ public class ProductosController : ControllerBase
     }
 
     // SOFT DELETE: En lugar de borrar de la BD, marcamos Activo = false
+    // Solo Administrador (1) o Superusuario (3): un Cajero no puede cambiar precios ni stock
+    [Authorize(Roles = "1,3")]
     [HttpDelete("{id}")]
     public async Task<IActionResult> DeleteProducto(int id)
     {
