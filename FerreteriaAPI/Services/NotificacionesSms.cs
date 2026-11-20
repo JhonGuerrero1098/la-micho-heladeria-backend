@@ -39,10 +39,28 @@ public class ColaSms
             _logger.LogInformation("SMS ({Motivo}) omitido: teléfono vacío o inválido ('{Telefono}')", motivo, telefono);
             return;
         }
-        if (!_canal.Writer.TryWrite(new MensajeSms(destino, texto, motivo)))
+        if (!_canal.Writer.TryWrite(new MensajeSms(destino, AAlfabetoSms(texto), motivo)))
         {
             _logger.LogWarning("SMS ({Motivo}) descartado: la cola de envío está cerrada", motivo);
         }
+    }
+
+    // Las vocales con tilde aguda (á, í, ó, ú, Á, É, Í, Ó, Ú) no existen en el alfabeto GSM-7 de los SMS:
+    // una sola obliga a codificar en UCS-2 y el mensaje pasa de 160 a 70 caracteres por SMS (doble costo).
+    // Se reemplazan por la vocal simple; é, ñ, Ñ y ü sí son GSM-7 y se conservan.
+    private static string AAlfabetoSms(string texto)
+    {
+        var resultado = new StringBuilder(texto.Length);
+        foreach (var c in texto)
+        {
+            resultado.Append(c switch
+            {
+                'á' => 'a', 'í' => 'i', 'ó' => 'o', 'ú' => 'u',
+                'Á' => 'A', 'É' => 'E', 'Í' => 'I', 'Ó' => 'O', 'Ú' => 'U',
+                _ => c
+            });
+        }
+        return resultado.ToString();
     }
 }
 

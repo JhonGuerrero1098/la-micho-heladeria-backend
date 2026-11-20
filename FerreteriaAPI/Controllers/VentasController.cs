@@ -491,7 +491,7 @@ public class VentasController : ControllerBase
 
         return Ok(new
         {
-            mensaje = "Producto más vendido de la ferretería (General)",
+            mensaje = "Producto más vendido de La Micho Heladería (General)",
             producto = productoMasVendido.Producto,
             totalUnidadesVendidas = productoMasVendido.TotalCantidadVendida
         });

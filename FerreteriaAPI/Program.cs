@@ -22,7 +22,7 @@ builder.Services.AddControllers()
 builder.Services.AddResponseCompression(options => options.EnableForHttps = true);
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c => c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo { Title = "La Micho Heladería API", Version = "v1" }));
 
 // Política CORS para permitir peticiones desde el frontend
 builder.Services.AddCors(options =>
