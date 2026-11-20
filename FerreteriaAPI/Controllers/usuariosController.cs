@@ -1,7 +1,9 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using FerreteriaAPI.Models;
+using FerreteriaAPI.Services;
 using Npgsql;
 
 namespace FerreteriaAPI.Controllers
@@ -12,15 +14,23 @@ namespace FerreteriaAPI.Controllers
     {
         private readonly FerreteriaContext _context;
         private readonly IPasswordHasher<Usuarios> _passwordHasher;
+        private readonly TokensJwt _tokens;
+        private readonly ILogger<UsuariosController> _logger;
 
-        public UsuariosController(FerreteriaContext context, IPasswordHasher<Usuarios> passwordHasher)
+        // Roles: 1 = Administrador, 2 = Cajero, 3 = Superusuario
+        private const string RolesGestion = "1,3";
+
+        public UsuariosController(FerreteriaContext context, IPasswordHasher<Usuarios> passwordHasher, TokensJwt tokens, ILogger<UsuariosController> logger)
         {
             _context = context;
             _passwordHasher = passwordHasher;
+            _tokens = tokens;
+            _logger = logger;
         }
 
-        // GET: api/Usuarios
+        // GET: api/Usuarios (solo Administrador o Superusuario)
         [HttpGet]
+        [Authorize(Roles = RolesGestion)]
         public async Task<ActionResult<IEnumerable<UsuarioDto>>> GetUsuarios()
         {
             // Proyección: no se lee la columna del hash de la contraseña
@@ -39,13 +49,24 @@ namespace FerreteriaAPI.Controllers
         }
 
         // POST: api/Usuarios/Registro
+        // Antes era público: cualquiera podía crearse una cuenta de Administrador. Ahora exige sesión de
+        // Administrador (solo crea Cajeros) o Superusuario (crea Administradores o Cajeros).
         [HttpPost("Registro")]
+        [Authorize(Roles = RolesGestion)]
         public async Task<IActionResult> Registro([FromBody] UsuarioRegistroDto dto)
         {
             // BLOQUEO DE SEGURIDAD: Nadie puede crear un Superusuario (Rol 3) desde la app web/API
             if (dto.IdRol == 3)
             {
                 return BadRequest(new { exito = false, mensaje = "Por seguridad, las cuentas con rol de Superusuario solo pueden ser creadas directamente desde la base de datos." });
+            }
+            if (dto.IdRol != 1 && dto.IdRol != 2)
+            {
+                return BadRequest(new { exito = false, mensaje = "Rol no válido." });
+            }
+            if (User.IsInRole("1") && dto.IdRol != 2)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new { exito = false, mensaje = "Un Administrador solo puede registrar cuentas de Cajero." });
             }
 
             try
@@ -84,19 +105,26 @@ namespace FerreteriaAPI.Controllers
             }
             catch (DbUpdateException dbEx)
             {
-                return BadRequest(new { exito = false, mensaje = "No se pudo registrar el usuario.", detalle = dbEx.InnerException?.Message ?? dbEx.Message });
+                // El detalle técnico va a los logs, no al cliente
+                _logger.LogError(dbEx, "Error de base de datos al registrar usuario");
+                return BadRequest(new { exito = false, mensaje = "No se pudo registrar el usuario." });
             }
             catch (Exception ex)
             {
-                return StatusCode(500, new { exito = false, mensaje = "Ocurrió un error al registrar el usuario.", detalle = ex.InnerException?.Message ?? ex.Message });
+                _logger.LogError(ex, "Error inesperado al registrar usuario");
+                return StatusCode(500, new { exito = false, mensaje = "Ocurrió un error al registrar el usuario." });
             }
         }
 
         // POST: api/Usuarios/Login
+        // Devuelve el usuario y un token JWT (8 h) que el frontend envía en "Authorization: Bearer ...".
         [HttpPost("Login")]
+        [AllowAnonymous]
         public async Task<ActionResult> Login(UsuarioLoginDto dto)
         {
-            var usuario = await _context.Usuarios.FirstOrDefaultAsync(u => u.Email == dto.Email);
+            // Los correos se registran en minúsculas: se normaliza para no fallar por mayúsculas/espacios
+            var emailLimpio = (dto.Email ?? string.Empty).Trim().ToLower();
+            var usuario = await _context.Usuarios.FirstOrDefaultAsync(u => u.Email.ToLower() == emailLimpio); // también usuarios antiguos con mayúsculas
             if (usuario == null || usuario.Estado == false)
             {
                 return Unauthorized("Correo o contraseña incorrectos.");
@@ -125,7 +153,8 @@ namespace FerreteriaAPI.Controllers
                 await _context.SaveChangesAsync();
             }
 
-            return Ok(new { mensaje = "Inicio de sesión exitoso", usuario });
+            var (token, expiraUtc) = _tokens.Emitir(usuario);
+            return Ok(new { mensaje = "Inicio de sesión exitoso", usuario, token, expiraEn = expiraUtc });
         }
     }
 }

@@ -75,6 +75,9 @@ public class ProductosController : ControllerBase
             return BadRequest();
         }
 
+        var errorValores = ValidarPrecioYStock(producto);
+        if (errorValores != null) return errorValores;
+
         var existente = await _context.Productos.FindAsync(id);
         if (existente == null)
         {
@@ -136,6 +139,9 @@ public class ProductosController : ControllerBase
         {
             return BadRequest(new { exito = false, mensaje = "El nombre del producto es obligatorio." });
         }
+
+        var errorValores = ValidarPrecioYStock(producto);
+        if (errorValores != null) return errorValores;
 
         var nombreLimpio = producto.Nombre.ToLower();
 
@@ -207,22 +213,31 @@ public class ProductosController : ControllerBase
         }
         catch (DbUpdateException dbEx)
         {
-            return BadRequest(new
-            {
-                exito = false,
-                mensaje = "No se pudo registrar el producto.",
-                detalle = dbEx.InnerException?.Message ?? dbEx.Message
-            });
+            // El detalle técnico va a los logs de Render, no al navegador
+            HttpContext.RequestServices.GetRequiredService<ILogger<ProductosController>>()
+                .LogError(dbEx, "Error de base de datos al registrar producto");
+            return BadRequest(new { exito = false, mensaje = "No se pudo registrar el producto." });
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new
-            {
-                exito = false,
-                mensaje = ex.Message,
-                detalle = ex.InnerException?.Message
-            });
+            HttpContext.RequestServices.GetRequiredService<ILogger<ProductosController>>()
+                .LogError(ex, "Error inesperado al registrar producto");
+            return StatusCode(500, new { exito = false, mensaje = "Ocurrió un error inesperado al registrar el producto." });
         }
+    }
+
+    // Precio y stock nunca negativos: un stock negativo permitiría vender lo que no existe
+    private ActionResult? ValidarPrecioYStock(Producto producto)
+    {
+        if (producto.Precio < 0)
+        {
+            return BadRequest(new { exito = false, mensaje = "El precio no puede ser negativo." });
+        }
+        if (producto.Stock < 0)
+        {
+            return BadRequest(new { exito = false, mensaje = "El stock no puede ser negativo." });
+        }
+        return null;
     }
 
     // SOFT DELETE: En lugar de borrar de la BD, marcamos Activo = false

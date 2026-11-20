@@ -35,7 +35,8 @@ public class CategoriasController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
+            HttpContext.RequestServices.GetRequiredService<ILogger<CategoriasController>>().LogError(ex, "Error en categorías");
+            return StatusCode(500, new { mensaje = "Ocurrió un error al procesar la categoría." });
         }
     }
 
@@ -89,7 +90,8 @@ public class CategoriasController : ControllerBase
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new { mensaje = ex.Message, detalle = ex.InnerException?.Message });
+            HttpContext.RequestServices.GetRequiredService<ILogger<CategoriasController>>().LogError(ex, "Error en categorías");
+            return StatusCode(500, new { mensaje = "Ocurrió un error al procesar la categoría." });
         }
     }
 

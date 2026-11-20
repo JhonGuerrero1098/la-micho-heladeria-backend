@@ -171,21 +171,16 @@ public class ClientesController : ControllerBase
         }
         catch (DbUpdateException dbEx)
         {
-            return BadRequest(new
-            {
-                exito = false,
-                mensaje = "No se pudo registrar el cliente.",
-                detalle = dbEx.InnerException?.Message ?? dbEx.Message
-            });
+            // El detalle técnico va a los logs de Render, no al navegador
+            HttpContext.RequestServices.GetRequiredService<ILogger<ClientesController>>()
+                .LogError(dbEx, "Error de base de datos al registrar cliente");
+            return BadRequest(new { exito = false, mensaje = "No se pudo registrar el cliente." });
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new
-            {
-                exito = false,
-                mensaje = "Ocurrió un error inesperado al registrar el cliente.",
-                detalle = ex.InnerException?.Message ?? ex.Message
-            });
+            HttpContext.RequestServices.GetRequiredService<ILogger<ClientesController>>()
+                .LogError(ex, "Error inesperado al registrar cliente");
+            return StatusCode(500, new { exito = false, mensaje = "Ocurrió un error inesperado al registrar el cliente." });
         }
     }
 

@@ -13,10 +13,22 @@ using System.Text.Json;
 public class VentasController : ControllerBase
 {
     private readonly FerreteriaContext _context;
+    private readonly ColaSms _colaSms;
+    private readonly IConfiguration _config;
+    private readonly ILogger<VentasController> _logger;
 
-    public VentasController(FerreteriaContext context)
+    // Límites de una venta: evitan cuerpos gigantes y desbordes al multiplicar precio × cantidad
+    private const int MaxLineasPorVenta = 200;
+    private const int MaxCantidadPorLinea = 100_000;
+    // Umbral de la alerta de stock bajo (SMS al administrador)
+    private const int UmbralStockBajo = 10;
+
+    public VentasController(FerreteriaContext context, ColaSms colaSms, IConfiguration config, ILogger<VentasController> logger)
     {
         _context = context;
+        _colaSms = colaSms;
+        _config = config;
+        _logger = logger;
     }
 
     // Proyección compartida por los GET de ventas: una sola consulta que trae solo las columnas
@@ -89,6 +101,15 @@ public class VentasController : ControllerBase
         {
             return BadRequest(new { exito = false, mensaje = "La venta debe incluir al menos un producto." });
         }
+        if (dto.DetalleVenta.Count > MaxLineasPorVenta)
+        {
+            return BadRequest(new { exito = false, mensaje = $"Una venta admite como máximo {MaxLineasPorVenta} líneas." });
+        }
+        // Cantidades validadas ANTES de tocar la base de datos (sin abrir transacción por un error del cliente)
+        if (dto.DetalleVenta.Any(d => d.Cantidad <= 0 || d.Cantidad > MaxCantidadPorLinea))
+        {
+            return BadRequest(new { exito = false, mensaje = $"Cada cantidad debe estar entre 1 y {MaxCantidadPorLinea}." });
+        }
 
         Guid? claveIdempotencia = null;
         if (!string.IsNullOrWhiteSpace(claveIdempotenciaTexto))
@@ -112,30 +133,27 @@ public class VentasController : ControllerBase
 
         try
         {
-            // 0. Idempotencia (camino rápido): si la clave ya tiene una venta guardada, se repite su respuesta
-            if (claveIdempotencia.HasValue)
-            {
-                var registroPrevio = await BuscarClaveVigenteAsync(claveIdempotencia.Value);
-                if (registroPrevio != null)
-                {
-                    return RepetirRespuesta(registroPrevio, huellaSolicitud);
-                }
-            }
+            // (Ya no hay consulta previa de "camino rápido" para la clave de idempotencia: el INSERT ...
+            //  ON CONFLICT dentro de la transacción detecta igual la repetición, y así cada venta normal
+            //  se ahorra un viaje de ida y vuelta a Supabase.)
 
-            // 1. Validar si el cliente existe (si se envió un IdCliente). Se guarda su resumen
-            //    para devolverlo en la respuesta sin otra consulta.
+            // 1. Validar si el cliente existe (si se envió un IdCliente). Se guarda su resumen para
+            //    devolverlo en la respuesta, y su teléfono para el SMS, sin otra consulta.
             ClienteResumenDto? clienteResumen = null;
+            string? telefonoCliente = null;
             if (dto.IdCliente.HasValue)
             {
-                clienteResumen = await _context.Clientes
+                var cliente = await _context.Clientes
                     .AsNoTracking()
                     .Where(c => c.Id == dto.IdCliente.Value)
-                    .Select(c => new ClienteResumenDto { Id = c.Id, Nombre = c.Nombre, Cedula = c.Cedula })
+                    .Select(c => new { c.Id, c.Nombre, c.Cedula, c.Telefono })
                     .FirstOrDefaultAsync();
-                if (clienteResumen == null)
+                if (cliente == null)
                 {
                     return NotFound(new { exito = false, mensaje = $"El cliente con ID {dto.IdCliente.Value} no existe en la base de datos." });
                 }
+                clienteResumen = new ClienteResumenDto { Id = cliente.Id, Nombre = cliente.Nombre, Cedula = cliente.Cedula };
+                telefonoCliente = cliente.Telefono;
             }
 
             // 2. Solo para clientes que NO envían clave (versiones anteriores del frontend): heurística de
@@ -169,9 +187,15 @@ public class VentasController : ControllerBase
             // =========================================================================
             var strategy = _context.Database.CreateExecutionStrategy();
 
+            // Datos para los SMS: solo se llenan justo después de un COMMIT exitoso. Una repetición
+            // idempotente o un error lo dejan en null: nunca se notifica una venta no guardada ni se
+            // duplica el SMS de una venta repetida.
+            (int IdVenta, decimal Total, List<(string Nombre, int Stock)> StockBajo)? ventaConfirmada = null;
+
             Func<Task<ActionResult<VentaDto>>> procesarVenta = async () =>
             {
                 _context.ChangeTracker.Clear();
+                ventaConfirmada = null;
 
                 await using var transaction = await _context.Database.BeginTransactionAsync();
                 try
@@ -183,12 +207,17 @@ public class VentasController : ControllerBase
                     //   devuelve la respuesta guardada en lugar de vender otra vez.
                     if (claveIdempotencia.HasValue)
                     {
-                        var limite = DateTime.UtcNow - IdempotenciaVentas.Vigencia;
-                        await _context.Database.ExecuteSqlInterpolatedAsync(
-                            $"DELETE FROM idempotencia_ventas WHERE clave = {claveIdempotencia.Value} AND creado_en < {limite}");
-
-                        var reservada = await _context.Database.ExecuteSqlInterpolatedAsync(
-                            $"INSERT INTO idempotencia_ventas (clave, huella, creado_en) VALUES ({claveIdempotencia.Value}, {huellaSolicitud}, {DateTime.UtcNow}) ON CONFLICT (clave) DO NOTHING");
+                        // Una sola sentencia (antes DELETE + INSERT, dos viajes): inserta la clave, o reutiliza
+                        // la fila si está vencida. Si la clave sigue vigente no toca nada y devuelve 0.
+                        var ahora = DateTime.UtcNow;
+                        var limite = ahora - IdempotenciaVentas.Vigencia;
+                        var reservada = await _context.Database.ExecuteSqlInterpolatedAsync($@"
+                            INSERT INTO idempotencia_ventas (clave, huella, creado_en)
+                            VALUES ({claveIdempotencia.Value}, {huellaSolicitud}, {ahora})
+                            ON CONFLICT (clave) DO UPDATE
+                                SET huella = EXCLUDED.huella, creado_en = EXCLUDED.creado_en,
+                                    id_venta = NULL, codigo_estado = NULL, respuesta = NULL
+                                WHERE idempotencia_ventas.creado_en < {limite}");
 
                         if (reservada == 0)
                         {
@@ -215,12 +244,6 @@ public class VentasController : ControllerBase
                             return (ActionResult<VentaDto>)NotFound(new { exito = false, mensaje = $"El producto con ID {itemDto.IdProducto} no existe." });
                         }
 
-                        if (itemDto.Cantidad <= 0)
-                        {
-                            await RollbackSeguroAsync(transaction);
-                            return (ActionResult<VentaDto>)BadRequest(new { exito = false, mensaje = $"La cantidad para el producto {producto.Nombre} debe ser mayor a cero." });
-                        }
-
                         // Suma las líneas repetidas del mismo producto para no vender más de lo que hay
                         var cantidadSolicitada = dto.DetalleVenta.Where(d => d.IdProducto == itemDto.IdProducto).Sum(d => d.Cantidad);
                         if (producto.Stock < cantidadSolicitada)
@@ -239,20 +262,17 @@ public class VentasController : ControllerBase
                     };
 
                     decimal valorTotalCalculado = 0;
+                    var stockInicial = productosDb.ToDictionary(p => p.Id, p => p.Stock);
 
                     foreach (var itemDto in dto.DetalleVenta)
                     {
                         var producto = productosDb.First(p => p.Id == itemDto.IdProducto);
 
+                        // Precio SIEMPRE de la base de datos (fila bloqueada FOR UPDATE), nunca del frontend
                         valorTotalCalculado += producto.Precio * itemDto.Cantidad;
 
                         // Descontamos el stock localmente (el change tracker lo detectará)
                         producto.Stock -= itemDto.Cantidad;
-
-                        if (producto.Stock <= 10)
-                        {
-                            EnviarSmsAlAdmin(producto.Nombre, producto.Stock);
-                        }
 
                         nuevaVenta.DetalleVenta.Add(new DetalleVenta
                         {
@@ -311,6 +331,14 @@ public class VentasController : ControllerBase
 
                     await transaction.CommitAsync();
 
+                    // Alerta solo para los productos que CRUZARON el umbral con esta venta (no en cada venta
+                    // posterior), para no saturar al administrador con el mismo aviso.
+                    var stockBajo = productosDb
+                        .Where(p => p.Stock <= UmbralStockBajo && stockInicial[p.Id] > UmbralStockBajo)
+                        .Select(p => (p.Nombre, p.Stock))
+                        .ToList();
+                    ventaConfirmada = (nuevaVenta.Id, nuevaVenta.ValorTotal, stockBajo);
+
                     return CreatedAtAction(nameof(GetVenta), new { id = nuevaVenta.Id }, cuerpoRespuesta);
                 }
                 catch
@@ -320,9 +348,10 @@ public class VentasController : ControllerBase
                 }
             };
 
+            ActionResult<VentaDto> resultado;
             try
             {
-                return await strategy.ExecuteAsync(procesarVenta);
+                resultado = await strategy.ExecuteAsync(procesarVenta);
             }
             catch (DbUpdateException dbEx) when (SecuenciasIds.EsLlavePrimariaDuplicada(dbEx))
             {
@@ -331,27 +360,59 @@ public class VentasController : ControllerBase
                 // así que se sincronizan ambas secuencias y se procesa la venta una sola vez más.
                 await SecuenciasIds.SincronizarAsync(_context, "ventas");
                 await SecuenciasIds.SincronizarAsync(_context, "detalleventa");
-                return await strategy.ExecuteAsync(procesarVenta);
+                resultado = await strategy.ExecuteAsync(procesarVenta);
             }
+
+            // La venta ya está confirmada en la base: los SMS solo se ENCOLAN (no se espera a Twilio)
+            if (ventaConfirmada.HasValue)
+            {
+                var (idVenta, total, stockBajo) = ventaConfirmada.Value;
+                EncolarSmsDeVenta(idVenta, total, metodoPago, telefonoCliente, stockBajo);
+            }
+            return resultado;
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException dbEx)
         {
-            return BadRequest(new
-            {
-                exito = false,
-                mensaje = "Error de base de datos al procesar la venta.",
-                errorInterno = dbEx.InnerException?.Message ?? dbEx.Message
-            });
+            // El detalle técnico (tablas, columnas, restricciones) va a los logs de Render, no al navegador
+            _logger.LogError(dbEx, "Error de base de datos al procesar la venta");
+            return BadRequest(new { exito = false, mensaje = "Error de base de datos al procesar la venta." });
         }
         catch (Exception ex)
         {
-            return StatusCode(500, new
+            _logger.LogError(ex, "Error inesperado al procesar la venta");
+            return StatusCode(500, new { exito = false, mensaje = "Ocurrió un error inesperado al procesar la venta." });
+        }
+    }
+
+    // Nunca lanza: un fallo aquí no debe convertir en error una venta que ya se guardó
+    private void EncolarSmsDeVenta(int idVenta, decimal total, string metodoPago, string? telefonoCliente,
+                                   List<(string Nombre, int Stock)> stockBajo)
+    {
+        try
+        {
+            var totalTexto = total.ToString("N0", System.Globalization.CultureInfo.GetCultureInfo("es-CO"));
+            if (!string.IsNullOrWhiteSpace(telefonoCliente))
             {
-                exito = false,
-                mensaje = "Ocurrió un error inesperado al procesar la venta.",
-                errorInterno = ex.InnerException?.Message ?? ex.Message,
-                stackTrace = ex.StackTrace
-            });
+                _colaSms.Encolar(telefonoCliente,
+                    $"La Micho Heladeria: pago recibido. Factura #{idVenta} por ${totalTexto} ({metodoPago}). Gracias por tu compra!",
+                    $"confirmación venta #{idVenta}");
+            }
+            else
+            {
+                _logger.LogInformation("Venta #{IdVenta} sin cliente o sin teléfono: no se envía SMS de confirmación", idVenta);
+            }
+
+            var telefonoAdmin = _config["Sms:TelefonoAdmin"];
+            if (stockBajo.Count > 0 && !string.IsNullOrWhiteSpace(telefonoAdmin))
+            {
+                var lista = string.Join(", ", stockBajo.Select(p => $"{p.Nombre} ({p.Stock})"));
+                var texto = $"La Micho: stock bajo tras la venta #{idVenta}: {lista}";
+                _colaSms.Encolar(telefonoAdmin, texto.Length > 300 ? texto[..297] + "..." : texto, "alerta stock bajo");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "No se pudieron encolar los SMS de la venta #{IdVenta}", idVenta);
         }
     }
 
@@ -390,12 +451,11 @@ public class VentasController : ControllerBase
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ERROR REAL EN DB: {ex.InnerException?.Message ?? ex.Message}");
+            _logger.LogError(ex, "Error al consultar las ventas por fecha");
             return StatusCode(500, new
             {
                 exito = false,
-                mensaje = "Ocurrió un error al consultar las ventas por fecha.",
-                detalle = ex.InnerException?.Message ?? ex.Message
+                mensaje = "Ocurrió un error al consultar las ventas por fecha."
             });
         }
     }
@@ -608,11 +668,6 @@ public class VentasController : ControllerBase
             .GroupBy(l => l.IdProducto)
             .OrderBy(g => g.Key)
             .Select(g => $"{g.Key}x{g.Sum(l => l.Cantidad)}"));
-
-    private void EnviarSmsAlAdmin (string nombreProducto, int stockActual)
-    {
-        string mensaje = $"Stock insuficiente para el producto {nombreProducto}";
-    }
 }
 
 // DTOs limpios sin duplicidad de nombres

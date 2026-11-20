@@ -1,5 +1,7 @@
 using FerreteriaAPI.Models;
 using FerreteriaAPI.Services;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -57,6 +59,28 @@ builder.Services.AddDbContext<FerreteriaContext>(options =>
 // Hash de contraseñas (PBKDF2 con HMAC-SHA512, sal aleatoria por usuario)
 builder.Services.AddScoped<IPasswordHasher<Usuarios>, PasswordHasher<Usuarios>>();
 
+// ==========================================
+// AUTENTICACIÓN (JWT Bearer)
+// Todos los endpoints exigen un token válido salvo los marcados con [AllowAnonymous] (Login, /salud).
+// ==========================================
+builder.Services.AddSingleton<TokensJwt>();
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<TokensJwt>((opciones, tokens) =>
+    {
+        opciones.MapInboundClaims = false; // conserva los nombres "sub", "email", "rol"
+        opciones.TokenValidationParameters = tokens.ParametrosValidacion();
+    });
+builder.Services.AddAuthorization(opciones =>
+{
+    opciones.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
+});
+
+// SMS: cola en memoria + envío en segundo plano (no bloquea la respuesta de la venta)
+builder.Services.AddHttpClient("twilio");
+builder.Services.AddSingleton<ColaSms>();
+builder.Services.AddHostedService<EnvioSmsService>();
+
 // Limpieza periódica de las claves de idempotencia de ventas (vencen a los 15 minutos)
 builder.Services.AddHostedService<LimpiezaIdempotenciaService>();
 
@@ -90,11 +114,16 @@ app.MapGet("/", async context =>
 {
     context.Response.Redirect("/swagger");
     await Task.CompletedTask;
-});
+}).AllowAnonymous();
+
+// Ping liviano (sin base de datos): el login lo llama al abrirse para despertar a Render
+// mientras el usuario escribe sus credenciales.
+app.MapGet("/salud", () => Results.Ok(new { estado = "ok" })).AllowAnonymous();
 
 
 app.UseHttpsRedirection();
 app.UseCors("AngularPolicy");
+app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
